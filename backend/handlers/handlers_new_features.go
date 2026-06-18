@@ -12,11 +12,13 @@ import (
 	"github.com/jackc/pgx/v4"
 
 	"bianzhong-acoustic-system/database"
+	"bianzhong-acoustic-system/empirical_rule_validator"
 	"bianzhong-acoustic-system/models"
-	"bianzhong-acoustic-system/simulation"
+	"bianzhong-acoustic-system/technique_comparator"
+	"bianzhong-acoustic-system/vr_tuning"
 )
 
-var virtualSessions = make(map[string]*models.VirtualTuningSession)
+var virtualSessions = make(map[string]*vr_tuning.VRTuningSession)
 
 func GetTuningProcesses(w http.ResponseWriter, r *http.Request) {
 	rows, err := database.DB.Query(context.Background(), `
@@ -90,16 +92,15 @@ func CompareTuningProcesses(w http.ResponseWriter, r *http.Request) {
 		req.TargetFreq = bell.TargetFrequency
 	}
 
-	sim := simulation.NewFEMSimulator(&bell)
-	results := sim.CompareTuningProcesses(req.CurrentFreq, req.TargetFreq)
+	tc := technique_comparator.NewTechniqueComparator(&bell)
+	results := tc.Compare(req.CurrentFreq, req.TargetFreq)
 
+	best := tc.BestProcess(req.CurrentFreq, req.TargetFreq)
 	bestProcess := ""
-	bestScore := -1.0
-	for _, r := range results {
-		if r.OverallScore > bestScore {
-			bestScore = r.OverallScore
-			bestProcess = r.ProcessType
-		}
+	bestScore := 0.0
+	if best != nil {
+		bestProcess = best.ProcessType
+		bestScore = best.OverallScore
 	}
 
 	confidence := 0.0
@@ -179,30 +180,11 @@ func ValidateEmpiricalRule(w http.ResponseWriter, r *http.Request) {
 	}
 	json.Unmarshal(varsJSON, &rule.Variables)
 
-	computed, expected, deviation, valid, pValue, ciLow, ciHigh, sig, effectSize, stdErr, confidence :=
-		computeRuleValidation(rule, req.Params)
-
-	sampleSize := 100
-	if val, ok := req.Params["sample_size"]; ok {
-		if f, ok := val.(float64); ok {
-			sampleSize = int(f)
-		}
-	}
-
-	result := models.RuleValidation{
-		RuleID:                  rule.ID,
-		ValidationResult:        valid,
-		DeviationPercent:        deviation,
-		ComputedValue:           computed,
-		ExpectedValue:           expected,
-		SampleSize:              sampleSize,
-		Confidence:              confidence,
-		PValue:                  pValue,
-		ConfidenceIntervalLow:   ciLow,
-		ConfidenceIntervalHigh:  ciHigh,
-		StatisticalSignificance: sig,
-		EffectSize:              effectSize,
-		StandardError:           stdErr,
+	validator := empirical_rule_validator.NewRuleValidator()
+	result, err := validator.Validate(rule, req.Params)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 
 	respondJSON(w, http.StatusOK, result)
@@ -380,23 +362,12 @@ func StartVirtualTuning(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := uuid.New().String()
-	initialFreq := bell.TargetFrequency * (1 + (randFloat64()*0.04 - 0.02))
 
-	session := &models.VirtualTuningSession{
-		SessionID:    sessionID,
-		BellID:       bell.ID,
-		CurrentFreq:  initialFreq,
-		OriginalFreq: initialFreq,
-		TargetFreq:   bell.TargetFrequency,
-		History:      make([]models.VirtualGrind, 0),
-		TotalDepthMm: 0,
-		CreatedAt:    time.Now(),
-		LastModified: time.Now(),
-	}
+	session := vr_tuning.NewVRTuningSession(sessionID, &bell)
 
 	virtualSessions[sessionID] = session
 
-	respondJSON(w, http.StatusCreated, session)
+	respondJSON(w, http.StatusCreated, session.ToModel())
 }
 
 func VirtualTuningGrind(w http.ResponseWriter, r *http.Request) {
@@ -421,52 +392,29 @@ func VirtualTuningGrind(w http.ResponseWriter, r *http.Request) {
 		req.ProcessType = "grinding"
 	}
 
-	var bell models.Bell
-	database.DB.QueryRow(context.Background(), `
-		SELECT id, name, target_frequency, tolerance_cents,
-		       thickness_mm, max_grinding_depth_mm
-		FROM bells WHERE id = $1
-	`, session.BellID).Scan(&bell.ID, &bell.Name, &bell.TargetFrequency,
-		&bell.ToleranceCents, &bell.ThicknessMm, &bell.MaxGrindingDepthMm)
+	resultCh := session.ApplyProcessAsync(req.ProcessType, req.Position, req.DepthMm)
+	result := <-resultCh
 
-	sim := simulation.NewFEMSimulator(&bell)
-
-	sim.ApplyTuningProcess(req.ProcessType, req.Position, req.DepthMm)
-
-	eigenfreqs := sim.CalculateEigenfrequencies()
-
-	beforeFreq := session.CurrentFreq
-	afterFreq := eigenfreqs[0]
-
-	if req.ProcessType == "casting_inlay" || req.ProcessType == "welding_repair" {
-		afterFreq = beforeFreq * (1 - req.DepthMm/bell.ThicknessMm*0.08)
-	} else {
-		afterFreq = beforeFreq * (1 + req.DepthMm/bell.ThicknessMm*0.12)
+	if result.Error != nil {
+		respondError(w, http.StatusInternalServerError, result.Error.Error())
+		return
 	}
 
-	dev := 1200.0 * math.Log2(afterFreq/session.TargetFreq)
+	grind, _ := result.Result.(models.VirtualGrind)
 
-	grind := models.VirtualGrind{
-		Time:        time.Now(),
-		Position:    req.Position,
-		DepthMm:     req.DepthMm,
-		ProcessType: req.ProcessType,
-		BeforeFreq:  beforeFreq,
-		AfterFreq:   afterFreq,
-		Deviation:   dev,
-	}
+	eigenfreqsCh := session.GetEigenfrequenciesAsync()
+	freqResult := <-eigenfreqsCh
+	eigenfreqs, _ := freqResult.Result.([]float64)
 
-	session.History = append(session.History, grind)
-	session.CurrentFreq = afterFreq
-	session.TotalDepthMm += math.Abs(req.DepthMm)
-	session.LastModified = time.Now()
+	harmonicity := session.GetHarmonicity()
+	withinTolerance := session.IsWithinTolerance()
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"session":          session,
+		"session":          session.ToModel(),
 		"grind_result":     grind,
 		"eigenfreqs":       eigenfreqs,
-		"harmonicity":      sim.CalculateHarmonicity(),
-		"within_tolerance": math.Abs(dev) <= bell.ToleranceCents,
+		"harmonicity":      harmonicity,
+		"within_tolerance": withinTolerance,
 	})
 }
 
@@ -478,29 +426,22 @@ func VirtualTuningPlay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var bell models.Bell
-	database.DB.QueryRow(context.Background(), `
-		SELECT id, name, target_frequency, thickness_mm
-		FROM bells WHERE id = $1
-	`, session.BellID).Scan(&bell.ID, &bell.Name, &bell.TargetFrequency, &bell.ThicknessMm)
+	freqsCh := session.GetEigenfrequenciesAsync()
+	freqResult := <-freqsCh
+	eigenfreqs, _ := freqResult.Result.([]float64)
 
-	sim := simulation.NewFEMSimulator(&bell)
-	eigenfreqs := sim.CalculateEigenfrequencies()
-	harmonicity := sim.CalculateHarmonicity()
-
-	amplitudes := make([]float64, len(eigenfreqs))
-	for i := range eigenfreqs {
-		amplitudes[i] = math.Exp(-float64(i) * 0.4)
-	}
+	harmonicity := session.GetHarmonicity()
+	amplitudes := session.GetAmplitudes()
+	decayRates := session.GetDecayRates()
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"session_id":   sessionID,
 		"freqs":        eigenfreqs,
 		"amplitudes":   amplitudes,
-		"current_freq": session.CurrentFreq,
-		"target_freq":  session.TargetFreq,
+		"current_freq": session.GetCurrentFreq(),
+		"target_freq":  session.GetTargetFreq(),
 		"harmonicity":  harmonicity,
-		"decay_rates":  []float64{1.5, 2.0, 2.8, 3.5, 4.2, 5.0, 5.8, 6.5},
+		"decay_rates":  decayRates,
 	})
 }
 
@@ -512,12 +453,9 @@ func VirtualTuningReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session.CurrentFreq = session.OriginalFreq
-	session.History = make([]models.VirtualGrind, 0)
-	session.TotalDepthMm = 0
-	session.LastModified = time.Now()
+	session.Reset()
 
-	respondJSON(w, http.StatusOK, session)
+	respondJSON(w, http.StatusOK, session.ToModel())
 }
 
 func GetVirtualTuningSession(w http.ResponseWriter, r *http.Request) {
@@ -528,7 +466,7 @@ func GetVirtualTuningSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, session)
+	respondJSON(w, http.StatusOK, session.ToModel())
 }
 
 func randFloat64() float64 {
