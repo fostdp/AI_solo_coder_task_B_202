@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>古代编钟调音磨锉声学仿真与音高修正系统</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <header class="top-bar">
+        <div class="logo">
+            <span class="icon">🔔</span>
+            <h1>编钟声学仿真与音高修正系统</h1>
+        </div>
+        <div class="status-indicators">
+            <div class="status-item">
+                <span class="status-dot" id="dbStatus"></span>
+                <span>数据库</span>
+            </div>
+            <div class="status-item">
+                <span class="status-dot" id="wsStatus"></span>
+                <span>WebSocket</span>
+            </div>
+            <div class="status-item">
+                <span class="status-dot" id="mqttStatus"></span>
+                <span>MQTT告警</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <aside class="sidebar">
+            <div class="panel">
+                <h2>编钟列表</h2>
+                <div id="bellList" class="bell-list"></div>
+            </div>
+
+            <div class="panel" id="bellInfoPanel">
+                <h2>编钟信息</h2>
+                <div id="bellInfo" class="info-content">
+                    <p class="placeholder">请选择编钟</p>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>控制面板</h2>
+                <div class="control-group">
+                    <label>振动模态</label>
+                    <select id="modeSelect">
+                        <option value="0">第1阶模态 (基频)</option>
+                        <option value="1">第2阶模态 (2倍频)</option>
+                        <option value="2">第3阶模态 (3倍频)</option>
+                        <option value="3">第4阶模态</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>显示选项</label>
+                    <div class="checkbox-group">
+                        <label><input type="checkbox" id="showContours" checked> 振动等高线</label>
+                        <label><input type="checkbox" id="showGrinding" checked> 磨锉位置</label>
+                        <label><input type="checkbox" id="showWireframe"> 线框模式</label>
+                        <label><input type="checkbox" id="autoRotate"> 自动旋转</label>
+                    </div>
+                </div>
+                <div class="control-group">
+                    <button id="simulateBtn" class="btn btn-primary">运行声学仿真</button>
+                    <button id="correctBtn" class="btn btn-secondary">音高修正分析</button>
+                </div>
+            </div>
+        </aside>
+
+        <main class="content">
+            <div class="stats-bar">
+                <div class="stat-card">
+                    <div class="stat-value" id="statBells">0</div>
+                    <div class="stat-label">在编钟数</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="statMeasurements">0</div>
+                    <div class="stat-label">24h测量数</div>
+                </div>
+                <div class="stat-card alert">
+                    <div class="stat-value" id="statAlerts">0</div>
+                    <div class="stat-label">活动告警</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="statGrinding">0</div>
+                    <div class="stat-label">24h磨锉次数</div>
+                </div>
+            </div>
+
+            <div class="viewer-section">
+                <div class="viewer-header">
+                    <h2>三维可视化 - <span id="viewerBellName">未选择</span></h2>
+                    <div class="legend">
+                        <div class="legend-item">
+                            <span class="legend-color" style="background: linear-gradient(90deg, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)"></span>
+                            <span>低位移 ← 振动等高线 → 高位移</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-color legend-highlight"></span>
+                            <span>磨锉位置</span>
+                        </div>
+                    </div>
+                </div>
+                <div id="bellViewer" class="bell-viewer"></div>
+                <div class="viewer-overlay" id="viewerOverlay">
+                    <div id="tooltip" class="tooltip" style="display:none"></div>
+                </div>
+            </div>
+
+            <div class="charts-section">
+                <div class="chart-card">
+                    <h3>基频偏差趋势</h3>
+                    <canvas id="frequencyChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>泛音频谱分析</h3>
+                    <canvas id="spectrumChart"></canvas>
+                </div>
+                <div class="chart-card correction-card">
+                    <h3>音高修正建议</h3>
+                    <div id="correctionResult" class="correction-result">
+                        <p class="placeholder">点击"音高修正分析"获取磨锉推荐方案</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="alerts-section">
+                <h2>告警事件</h2>
+                <div id="alertList" class="alert-list">
+                    <p class="placeholder">暂无告警</p>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/bell3d.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
