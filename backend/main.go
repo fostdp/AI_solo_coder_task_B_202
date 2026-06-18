@@ -77,6 +77,21 @@ func main() {
 
 	api.HandleFunc("/ws", handlers.WebSocketHandler)
 
+	api.HandleFunc("/processes", handlers.GetTuningProcesses).Methods("GET")
+	api.HandleFunc("/processes/compare", handlers.CompareTuningProcesses).Methods("POST")
+	api.HandleFunc("/processes/stats", handlers.GetComparisonStats).Methods("GET")
+
+	api.HandleFunc("/rules", handlers.GetEmpiricalRules).Methods("GET")
+	api.HandleFunc("/rules/validate", handlers.ValidateEmpiricalRule).Methods("POST")
+
+	api.HandleFunc("/comparisons", handlers.GetComparisonArticles).Methods("GET")
+
+	api.HandleFunc("/virtual/start", handlers.StartVirtualTuning).Methods("POST")
+	api.HandleFunc("/virtual/{session_id}", handlers.GetVirtualTuningSession).Methods("GET")
+	api.HandleFunc("/virtual/{session_id}/grind", handlers.VirtualTuningGrind).Methods("POST")
+	api.HandleFunc("/virtual/{session_id}/play", handlers.VirtualTuningPlay).Methods("POST")
+	api.HandleFunc("/virtual/{session_id}/reset", handlers.VirtualTuningReset).Methods("POST")
+
 	port := getEnv("PORT", "8080")
 
 	frontendDir := getEnv("FRONTEND_DIR", "./frontend")

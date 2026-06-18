@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
+	github.com/google/uuid v1.5.0
 	github.com/gorilla/mux v1.8.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v4 v4.18.3

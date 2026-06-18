@@ -10,41 +10,41 @@ import (
 )
 
 const (
-	BronzeYoungModulus   = 110e9
-	BronzeDensity        = 8800.0
-	BronzePoissonRatio   = 0.34
-	SpeedOfSoundBronze   = 3500.0
-	GridResolution       = 20
+	BronzeYoungModulus = 110e9
+	BronzeDensity      = 8800.0
+	BronzePoissonRatio = 0.34
+	SpeedOfSoundBronze = 3500.0
+	GridResolution     = 20
 
-	MinThicknessRatio    = 0.4
-	MaxThicknessGradient = 0.3
+	MinThicknessRatio        = 0.4
+	MaxThicknessGradient     = 0.3
 	MaxDistortedElementRatio = 0.08
-	RebuildSmoothingKernel = 3
+	RebuildSmoothingKernel   = 3
 
-	MaxRebuildRetries    = 3
+	MaxRebuildRetries     = 3
 	MinConnectedNodeRatio = 0.6
-	TopologyCheckMask    = 0x4
+	TopologyCheckMask     = 0x4
 )
 
 type FEMGrid struct {
-	Nodes     [][][]FEMNode
-	Nx, Ny, Nz int
-	Dx, Dy, Dz float64
-	Generation  int
+	Nodes        [][][]FEMNode
+	Nx, Ny, Nz   int
+	Dx, Dy, Dz   float64
+	Generation   int
 	RebuildCount int
 }
 
 type FEMNode struct {
-	X, Y, Z        float64
-	Displacement   [3]float64
-	Velocity       [3]float64
-	Stress         float64
-	Strain         float64
-	Thickness      float64
-	IsActive       bool
-	Grinded        bool
+	X, Y, Z           float64
+	Displacement      [3]float64
+	Velocity          [3]float64
+	Stress            float64
+	Strain            float64
+	Thickness         float64
+	IsActive          bool
+	Grinded           bool
 	OriginalThickness float64
-	QualityFlag    int
+	QualityFlag       int
 }
 
 type GrindingRecord struct {
@@ -89,7 +89,279 @@ func NewFEMSimulator(bell *models.Bell) *FEMSimulator {
 		Bell:            bell,
 		StartTime:       time.Now(),
 		GrindingHistory: make([]GrindingRecord, 0),
+		ProcessHistory:  make([]TuningProcessRecord, 0),
+		InlayMasses:     make([]InlayMass, 0),
+		WeldPatches:     make([]WeldPatch, 0),
 	}
+}
+
+func (s *FEMSimulator) ApplyTuningProcess(processType string, pos models.GrindingPosition, depthMm float64) {
+	if s.Grid == nil {
+		s.GenerateGrid()
+	}
+
+	snapshot := s.snapshotGrid()
+
+	switch processType {
+	case ProcessGrinding:
+		s.applyGrindingInternal(pos, depthMm)
+	case ProcessCastingInlay:
+		s.applyCastingInlayInternal(pos, depthMm)
+	case ProcessWeldingRepair:
+		s.applyWeldingRepairInternal(pos, depthMm)
+	default:
+		s.applyGrindingInternal(pos, depthMm)
+	}
+
+	s.ProcessHistory = append(s.ProcessHistory, TuningProcessRecord{
+		Position:    pos,
+		DepthMm:     depthMm,
+		Time:        time.Now(),
+		ProcessType: processType,
+	})
+
+	quality := s.EvaluateGridQuality()
+	if quality.ShouldRebuild || quality.TopologyBroken {
+		rebuildErr := s.RebuildGrid()
+		if rebuildErr != nil {
+			s.restoreGrid(snapshot)
+			s.ProcessHistory = s.ProcessHistory[:len(s.ProcessHistory)-1]
+		}
+	}
+}
+
+func (s *FEMSimulator) applyCastingInlayInternal(pos models.GrindingPosition, depthMm float64) {
+	inlayRadiusCm := 1.2
+	x0, y0, z0 := pos.X, pos.Y, pos.Z
+
+	for i := 0; i < s.Grid.Nx; i++ {
+		for j := 0; j < s.Grid.Ny; j++ {
+			for k := 0; k < s.Grid.Nz; k++ {
+				node := &s.Grid.Nodes[i][j][k]
+				if !node.IsActive {
+					continue
+				}
+
+				dist := math.Sqrt(
+					math.Pow(node.X-x0, 2) +
+						math.Pow(node.Y-y0, 2) +
+						math.Pow(node.Z-z0, 2))
+
+				if dist < inlayRadiusCm {
+					falloff := math.Cos(math.Pi * dist / (2 * inlayRadiusCm))
+					actualDepth := depthMm * falloff * falloff
+
+					newThickness := node.Thickness + actualDepth
+					maxAllowed := node.OriginalThickness * (1 + MinThicknessRatio)
+					if newThickness > maxAllowed {
+						newThickness = maxAllowed
+					}
+
+					node.Thickness = newThickness
+				}
+			}
+		}
+	}
+
+	s.InlayMasses = append(s.InlayMasses, InlayMass{
+		Position: pos,
+		RadiusCm: inlayRadiusCm,
+		DepthMm:  depthMm,
+		Density:  LeadDensity,
+	})
+}
+
+func (s *FEMSimulator) applyWeldingRepairInternal(pos models.GrindingPosition, depthMm float64) {
+	weldRadiusCm := 1.8
+	x0, y0, z0 := pos.X, pos.Y, pos.Z
+
+	for i := 0; i < s.Grid.Nx; i++ {
+		for j := 0; j < s.Grid.Ny; j++ {
+			for k := 0; k < s.Grid.Nz; k++ {
+				node := &s.Grid.Nodes[i][j][k]
+				if !node.IsActive {
+					continue
+				}
+
+				dist := math.Sqrt(
+					math.Pow(node.X-x0, 2) +
+						math.Pow(node.Y-y0, 2) +
+						math.Pow(node.Z-z0, 2))
+
+				if dist < weldRadiusCm {
+					falloff := math.Exp(-dist * dist / (weldRadiusCm * weldRadiusCm))
+					actualDepth := depthMm * falloff
+
+					newThickness := node.Thickness + actualDepth
+					maxAllowed := node.OriginalThickness * (1 + 0.6)
+					if newThickness > maxAllowed {
+						newThickness = maxAllowed
+					}
+
+					node.Thickness = newThickness
+					node.Stress *= WeldingStressFactor
+				}
+			}
+		}
+	}
+
+	s.WeldPatches = append(s.WeldPatches, WeldPatch{
+		Position: pos,
+		RadiusCm: weldRadiusCm,
+		DepthMm:  depthMm,
+	})
+}
+
+func (s *FEMSimulator) CalculateProcessSensitivity(processType string, pos models.GrindingPosition) float64 {
+	snapshot := s.snapshotGrid()
+	baseFreqs := s.CalculateEigenfrequencies()
+
+	s.ApplyTuningProcess(processType, pos, 0.1)
+	newFreqs := s.CalculateEigenfrequencies()
+
+	s.restoreGrid(snapshot)
+
+	sensitivity := (newFreqs[0] - baseFreqs[0]) / 0.1
+
+	return sensitivity
+}
+
+func (s *FEMSimulator) CalculateHarmonicity() float64 {
+	freqs := s.CalculateEigenfrequencies()
+	if len(freqs) < 2 {
+		return 0.0
+	}
+
+	idealRatios := []float64{1.0, 2.0, 3.0, 4.16, 5.42, 6.78, 8.15, 9.63}
+	totalDeviation := 0.0
+	count := 0
+
+	for i := 1; i < len(freqs); i++ {
+		actualRatio := freqs[i] / freqs[0]
+		if i < len(idealRatios) {
+			dev := math.Abs(actualRatio-idealRatios[i]) / idealRatios[i]
+			totalDeviation += dev
+			count++
+		}
+	}
+
+	if count == 0 {
+		return 0.0
+	}
+
+	avgDeviation := totalDeviation / float64(count)
+	harmonicity := 1.0 - math.Min(avgDeviation, 1.0)
+
+	for range s.InlayMasses {
+		harmonicity *= InlayHarmonicityPenalty
+	}
+
+	for range s.WeldPatches {
+		harmonicity *= 0.95
+	}
+
+	return math.Max(0.0, math.Min(1.0, harmonicity))
+}
+
+func (s *FEMSimulator) CompareTuningProcesses(currentFreq, targetFreq float64) []models.ProcessComparisonResult {
+	processTypes := []string{ProcessGrinding, ProcessCastingInlay, ProcessWeldingRepair}
+	results := make([]models.ProcessComparisonResult, 0, len(processTypes))
+
+	requiredDelta := targetFreq - currentFreq
+	totalDelta := 0.0
+	pos := models.GrindingPosition{X: 0, Y: 0, Z: 0}
+
+	for _, pt := range processTypes {
+		snapshot := s.snapshotGrid()
+
+		sensitivity := s.CalculateProcessSensitivity(pt, pos)
+
+		effectiveDelta := requiredDelta
+		if pt == ProcessGrinding && requiredDelta > 0 {
+			effectiveDelta = requiredDelta
+		} else if pt != ProcessGrinding && requiredDelta < 0 {
+			effectiveDelta = requiredDelta
+		}
+
+		requiredDepth := 0.0
+		if math.Abs(sensitivity) > 1e-6 {
+			requiredDepth = effectiveDelta / sensitivity
+		}
+
+		s.ApplyTuningProcess(pt, pos, math.Abs(requiredDepth))
+		estimatedFreq := s.CalculateEigenfrequencies()[0]
+		actualDelta := estimatedFreq - currentFreq
+
+		harmonicity := s.CalculateHarmonicity()
+		deviationCents := 1200.0 * math.Log2(estimatedFreq/targetFreq)
+
+		var complexity int
+		var reversibility bool
+		var damageRisk float64
+		var requiredTimeMin int
+		var costScore float64
+
+		switch pt {
+		case ProcessGrinding:
+			complexity = 2
+			reversibility = false
+			damageRisk = 0.15
+			requiredTimeMin = 30
+			costScore = 0.3
+		case ProcessCastingInlay:
+			complexity = 4
+			reversibility = true
+			damageRisk = 0.05
+			requiredTimeMin = 120
+			costScore = 0.7
+		case ProcessWeldingRepair:
+			complexity = 5
+			reversibility = true
+			damageRisk = 0.25
+			requiredTimeMin = 90
+			costScore = 0.8
+		}
+
+		freqScore := 1.0 - math.Abs(deviationCents)/100.0
+		timeScore := 1.0 - float64(requiredTimeMin)/180.0
+		reversibilityScore := 0.0
+		if reversibility {
+			reversibilityScore = 0.5
+		}
+		overallScore := (freqScore*0.5 + harmonicity*0.25 +
+			(1.0-complexity/10.0)*0.1 + (1.0-damageRisk)*0.1 +
+			reversibilityScore*0.05)
+
+		results = append(results, models.ProcessComparisonResult{
+			ProcessType:     pt,
+			EstimatedFreq:   estimatedFreq,
+			FreqDeltaHz:     actualDelta,
+			DeviationCents:  deviationCents,
+			Harmonicity:     harmonicity,
+			Complexity:      complexity,
+			Reversibility:   reversibility,
+			DamageRisk:      damageRisk,
+			RequiredTimeMin: requiredTimeMin,
+			CostScore:       costScore,
+			OverallScore:    math.Max(0, math.Min(1, overallScore)),
+		})
+
+		totalDelta += actualDelta
+
+		s.restoreGrid(snapshot)
+	}
+
+	return results
+}
+
+func (s *FEMSimulator) Reset() {
+	s.Grid = nil
+	s.GrindingHistory = make([]GrindingRecord, 0)
+	s.ProcessHistory = make([]TuningProcessRecord, 0)
+	s.InlayMasses = make([]InlayMass, 0)
+	s.WeldPatches = make([]WeldPatch, 0)
+	s.LastQuality = nil
+	s.GenerateGrid()
 }
 
 func (s *FEMSimulator) GenerateGrid() *FEMGrid {
@@ -203,17 +475,17 @@ func (s *FEMSimulator) EvaluateGridQuality() *GridQualityReport {
 				gradSum := 0.0
 
 				if i+1 < s.Grid.Nx && s.Grid.Nodes[i+1][j][k].IsActive {
-					g := math.Abs(node.Thickness - s.Grid.Nodes[i+1][j][k].Thickness) / s.Grid.Dx
+					g := math.Abs(node.Thickness-s.Grid.Nodes[i+1][j][k].Thickness) / s.Grid.Dx
 					gradSum += g
 					neighbors++
 				}
 				if j+1 < s.Grid.Ny && s.Grid.Nodes[i][j+1][k].IsActive {
-					g := math.Abs(node.Thickness - s.Grid.Nodes[i][j+1][k].Thickness) / s.Grid.Dy
+					g := math.Abs(node.Thickness-s.Grid.Nodes[i][j+1][k].Thickness) / s.Grid.Dy
 					gradSum += g
 					neighbors++
 				}
 				if k+1 < s.Grid.Nz && s.Grid.Nodes[i][j][k+1].IsActive {
-					g := math.Abs(node.Thickness - s.Grid.Nodes[i][j][k+1].Thickness) / s.Grid.Dz
+					g := math.Abs(node.Thickness-s.Grid.Nodes[i][j][k+1].Thickness) / s.Grid.Dz
 					gradSum += g
 					neighbors++
 				}
@@ -717,12 +989,12 @@ func (s *FEMSimulator) CalculateEigenfrequencies() []float64 {
 	thicknessM := averageThickness / 1000.0
 
 	baseFreq := (1.0 / (2.0 * math.Pi)) *
-		math.Sqrt((BronzeYoungModulus * thicknessM * thicknessM) /
-			(BronzeDensity * radiusM * radiusM * radiusM * radiusM)) *
-		math.Sqrt(s.Bell.TargetFrequency / baseFreq)
+		math.Sqrt((BronzeYoungModulus*thicknessM*thicknessM)/
+			(BronzeDensity*radiusM*radiusM*radiusM*radiusM)) *
+		math.Sqrt(s.Bell.TargetFrequency/baseFreq)
 
 	thicknessFactor := math.Pow(averageThickness/s.Bell.ThicknessMm, 0.75)
-	massFactor := math.Sqrt(s.Bell.MassKg*1000.0 / totalMass)
+	massFactor := math.Sqrt(s.Bell.MassKg * 1000.0 / totalMass)
 
 	correctedBaseFreq := baseFreq * thicknessFactor * massFactor * 0.85
 

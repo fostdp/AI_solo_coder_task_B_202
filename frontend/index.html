@@ -30,6 +30,34 @@
         </div>
     </header>
 
+    <nav class="feature-tabs">
+        <div class="tab active" data-tab="dashboard">
+            <span class="tab-icon">📊</span>
+            <span>主控台</span>
+        </div>
+        <div class="tab" data-tab="processes">
+            <span class="tab-icon">⚙️</span>
+            <span>工艺对比</span>
+        </div>
+        <div class="tab" data-tab="rules">
+            <span class="tab-icon">📜</span>
+            <span>经验法则</span>
+        </div>
+        <div class="tab" data-tab="comparisons">
+            <span class="tab-icon">🎹</span>
+            <span>跨时代对比</span>
+        </div>
+        <div class="tab" data-tab="virtual">
+            <span class="tab-icon">🎮</span>
+            <span>虚拟调音</span>
+        </div>
+        <div class="tab audio-tab">
+            <span class="tab-icon">🔊</span>
+            <span>音量</span>
+            <input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="0.3">
+        </div>
+    </nav>
+
     <div class="main-container">
         <aside class="sidebar">
             <div class="panel">
@@ -72,66 +100,241 @@
         </aside>
 
         <main class="content">
-            <div class="stats-bar">
-                <div class="stat-card">
-                    <div class="stat-value" id="statBells">0</div>
-                    <div class="stat-label">在编钟数</div>
+            <div class="tab-panel active" id="tab-dashboard">
+                <div class="stats-bar">
+                    <div class="stat-card">
+                        <div class="stat-value" id="statBells">0</div>
+                        <div class="stat-label">在编钟数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statMeasurements">0</div>
+                        <div class="stat-label">24h测量数</div>
+                    </div>
+                    <div class="stat-card alert">
+                        <div class="stat-value" id="statAlerts">0</div>
+                        <div class="stat-label">活动告警</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statGrinding">0</div>
+                        <div class="stat-label">24h磨锉次数</div>
+                    </div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-value" id="statMeasurements">0</div>
-                    <div class="stat-label">24h测量数</div>
-                </div>
-                <div class="stat-card alert">
-                    <div class="stat-value" id="statAlerts">0</div>
-                    <div class="stat-label">活动告警</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value" id="statGrinding">0</div>
-                    <div class="stat-label">24h磨锉次数</div>
-                </div>
-            </div>
 
-            <div class="viewer-section">
-                <div class="viewer-header">
-                    <h2>三维可视化 - <span id="viewerBellName">未选择</span></h2>
-                    <div class="legend">
-                        <div class="legend-item">
-                            <span class="legend-color" style="background: linear-gradient(90deg, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)"></span>
-                            <span>低位移 ← 振动等高线 → 高位移</span>
+                <div class="viewer-section">
+                    <div class="viewer-header">
+                        <h2>三维可视化 - <span id="viewerBellName">未选择</span></h2>
+                        <div class="legend">
+                            <div class="legend-item">
+                                <span class="legend-color" style="background: linear-gradient(90deg, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)"></span>
+                                <span>低位移 ← 振动等高线 → 高位移</span>
+                            </div>
+                            <div class="legend-item">
+                                <span class="legend-color legend-highlight"></span>
+                                <span>磨锉位置</span>
+                            </div>
                         </div>
-                        <div class="legend-item">
-                            <span class="legend-color legend-highlight"></span>
-                            <span>磨锉位置</span>
+                    </div>
+                    <div id="bellViewer" class="bell-viewer"></div>
+                    <div class="viewer-overlay" id="viewerOverlay">
+                        <div id="tooltip" class="tooltip" style="display:none"></div>
+                    </div>
+                </div>
+
+                <div class="charts-section">
+                    <div class="chart-card">
+                        <h3>基频偏差趋势</h3>
+                        <canvas id="frequencyChart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>泛音频谱分析</h3>
+                        <canvas id="spectrumChart"></canvas>
+                    </div>
+                    <div class="chart-card correction-card">
+                        <h3>音高修正建议</h3>
+                        <div id="correctionResult" class="correction-result">
+                            <p class="placeholder">点击"音高修正分析"获取磨锉推荐方案</p>
                         </div>
                     </div>
                 </div>
-                <div id="bellViewer" class="bell-viewer"></div>
-                <div class="viewer-overlay" id="viewerOverlay">
-                    <div id="tooltip" class="tooltip" style="display:none"></div>
-                </div>
-            </div>
 
-            <div class="charts-section">
-                <div class="chart-card">
-                    <h3>基频偏差趋势</h3>
-                    <canvas id="frequencyChart"></canvas>
-                </div>
-                <div class="chart-card">
-                    <h3>泛音频谱分析</h3>
-                    <canvas id="spectrumChart"></canvas>
-                </div>
-                <div class="chart-card correction-card">
-                    <h3>音高修正建议</h3>
-                    <div id="correctionResult" class="correction-result">
-                        <p class="placeholder">点击"音高修正分析"获取磨锉推荐方案</p>
+                <div class="alerts-section">
+                    <h2>告警事件</h2>
+                    <div id="alertList" class="alert-list">
+                        <p class="placeholder">暂无告警</p>
                     </div>
                 </div>
             </div>
 
-            <div class="alerts-section">
-                <h2>告警事件</h2>
-                <div id="alertList" class="alert-list">
-                    <p class="placeholder">暂无告警</p>
+            <div class="tab-panel" id="tab-processes">
+                <div class="section-header">
+                    <h2>🎛️ 调音工艺声学效果对比</h2>
+                    <p>对比磨锉、铸镶、焊补三种古代调音工艺的声学效果与工程特性</p>
+                </div>
+
+                <div class="process-controls">
+                    <div class="control-group">
+                        <label>选择编钟</label>
+                        <select id="processBellSelect"></select>
+                    </div>
+                    <div class="control-group">
+                        <label>当前频率 (Hz)</label>
+                        <input type="number" id="currentFreqInput" step="0.01">
+                    </div>
+                    <div class="control-group">
+                        <label>目标频率 (Hz)</label>
+                        <input type="number" id="targetFreqInput" step="0.01">
+                    </div>
+                    <div class="control-group">
+                        <button class="btn btn-primary" id="compareProcessBtn">运行对比分析</button>
+                        <button class="btn btn-secondary" id="listenComparisonBtn">🔊 试听对比</button>
+                    </div>
+                </div>
+
+                <div id="processResults" class="process-results">
+                    <p class="placeholder">选择参数后点击"运行对比分析"</p>
+                </div>
+
+                <div class="process-stats">
+                    <h3>📊 历史对比统计</h3>
+                    <div class="stat-row">
+                        <div class="mini-stat">
+                            <div class="mini-stat-value" id="totalComparisons">0</div>
+                            <div class="mini-stat-label">总对比次数</div>
+                        </div>
+                        <div class="mini-stat">
+                            <div class="mini-stat-value" id="grindingWins">0</div>
+                            <div class="mini-stat-label">磨锉胜出</div>
+                        </div>
+                        <div class="mini-stat">
+                            <div class="mini-stat-value" id="castingWins">0</div>
+                            <div class="mini-stat-label">铸镶胜出</div>
+                        </div>
+                        <div class="mini-stat">
+                            <div class="mini-stat-value" id="weldingWins">0</div>
+                            <div class="mini-stat-label">焊补胜出</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-panel" id="tab-rules">
+                <div class="section-header">
+                    <h2>📜 古代编钟调音经验法则</h2>
+                    <p>从《考工记》、《梦溪笔谈》等古籍中提取的调音经验与现代科学验证</p>
+                </div>
+
+                <div id="rulesList" class="rules-list">
+                    <p class="placeholder">加载中...</p>
+                </div>
+            </div>
+
+            <div class="tab-panel" id="tab-comparisons">
+                <div class="section-header">
+                    <h2>🎹 跨时代技术对比：编钟调音 vs 钢琴调律</h2>
+                    <p>公元前5世纪的古代智慧与18世纪工业文明的技术对话</p>
+                </div>
+
+                <div class="comparison-filters">
+                    <div class="filter-group">
+                        <label>对比维度</label>
+                        <select id="comparisonCategorySelect">
+                            <option value="">全部</option>
+                            <option value="principle">调音原理</option>
+                            <option value="accuracy">调律精度</option>
+                            <option value="harmonics">泛音结构</option>
+                            <option value="tools">调音工具</option>
+                            <option value="culture">文化意义</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="comparisonArticles" class="comparison-articles">
+                    <p class="placeholder">加载中...</p>
+                </div>
+            </div>
+
+            <div class="tab-panel" id="tab-virtual">
+                <div class="section-header">
+                    <h2>🎮 虚拟调音体验</h2>
+                    <p>亲身体验古代工匠的调音过程，通过磨锉调整编钟音高</p>
+                </div>
+
+                <div class="virtual-tuning-layout">
+                    <div class="virtual-controls">
+                        <div class="control-group">
+                            <label>选择编钟</label>
+                            <select id="virtualBellSelect"></select>
+                            <button class="btn btn-primary" id="startVirtualBtn">开始调音体验</button>
+                        </div>
+
+                        <div id="virtualSessionInfo" class="session-info" style="display:none">
+                            <div class="info-row">
+                                <span>初始频率:</span>
+                                <span id="virtualOriginalFreq" class="value">- Hz</span>
+                            </div>
+                            <div class="info-row highlight">
+                                <span>当前频率:</span>
+                                <span id="virtualCurrentFreq" class="value">- Hz</span>
+                            </div>
+                            <div class="info-row">
+                                <span>目标频率:</span>
+                                <span id="virtualTargetFreq" class="value">- Hz</span>
+                            </div>
+                            <div class="info-row">
+                                <span>偏差:</span>
+                                <span id="virtualDeviation" class="value">- ¢</span>
+                            </div>
+                            <div class="info-row">
+                                <span>累计磨锉:</span>
+                                <span id="virtualTotalDepth" class="value">- mm</span>
+                            </div>
+                            <div class="tolerance-bar">
+                                <div class="tolerance-fill" id="toleranceFill"></div>
+                                <div class="tolerance-marker" id="toleranceMarker"></div>
+                            </div>
+                            <div id="toleranceStatus" class="tolerance-status"></div>
+                        </div>
+
+                        <div id="virtualControls" class="virtual-action-controls" style="display:none">
+                            <div class="control-group">
+                                <label>调音工艺</label>
+                                <select id="virtualProcessSelect">
+                                    <option value="grinding">🪨 磨锉 (升频)</option>
+                                    <option value="casting_inlay">🔩 铸镶 (降频)</option>
+                                    <option value="welding_repair">🔥 焊补 (降频)</option>
+                                </select>
+                            </div>
+                            <div class="control-group">
+                                <label>磨锉深度 (mm)</label>
+                                <input type="range" id="virtualDepthSlider" min="0.05" max="1.0" step="0.01" value="0.2">
+                                <span id="virtualDepthValue">0.20 mm</span>
+                            </div>
+                            <div class="control-group">
+                                <label>磨锉位置</label>
+                                <select id="virtualPositionSelect">
+                                    <option value="center">中心</option>
+                                    <option value="top">上部</option>
+                                    <option value="bottom">下部</option>
+                                    <option value="left">左侧</option>
+                                    <option value="right">右侧</option>
+                                </select>
+                            </div>
+                            <div class="virtual-buttons">
+                                <button class="btn btn-primary" id="virtualGrindBtn">⚒️ 执行磨锉</button>
+                                <button class="btn btn-secondary" id="virtualPlayBtn">🔊 试听音色</button>
+                                <button class="btn btn-danger" id="virtualResetBtn">🔄 重置编钟</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="virtual-3d">
+                        <div id="virtualViewer" class="bell-viewer virtual-viewer"></div>
+                    </div>
+                </div>
+
+                <div class="virtual-history" id="virtualHistory" style="display:none">
+                    <h3>📋 调音操作历史</h3>
+                    <div id="virtualHistoryList" class="history-list"></div>
                 </div>
             </div>
         </main>
@@ -139,6 +342,7 @@
 
     <script src="js/api.js"></script>
     <script src="js/bell3d.js"></script>
+    <script src="js/audio.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>
