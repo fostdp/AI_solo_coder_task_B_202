@@ -1,0 +1,11 @@
+Error: exit status 1
+Output length: 517
+---OUTPUT START---
+go: downloading github.com/google/uuid v1.5.0
+# bianzhong-acoustic-system/handlers
+handlers\handlers_new_features.go:11:2: github.com/google/uuid@v1.5.0: Get "https://proxy.golang.org/github.com/google/uuid/@v/v1.5.0.zip": dial tcp [2404:6800:4012:9::2011]:443: connectex: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond.
+FAIL	bianzhong-acoustic-system/handlers [setup failed]
+FAIL
+
+---OUTPUT END---
+Exit code: 1

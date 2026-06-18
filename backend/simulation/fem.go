@@ -24,6 +24,15 @@ const (
 	MaxRebuildRetries     = 3
 	MinConnectedNodeRatio = 0.6
 	TopologyCheckMask     = 0x4
+
+	ProcessGrinding      = "grinding"
+	ProcessCastingInlay  = "casting_inlay"
+	ProcessWeldingRepair = "welding_repair"
+
+	LeadDensity             = 11340.0
+	InlayDampingFactor      = 0.88
+	InlayHarmonicityPenalty = 0.88
+	WeldingStressFactor     = 1.15
 )
 
 type FEMGrid struct {
@@ -68,6 +77,26 @@ type GridQualityReport struct {
 	TopologyBroken       bool
 }
 
+type TuningProcessRecord struct {
+	Position    models.GrindingPosition
+	DepthMm     float64
+	Time        time.Time
+	ProcessType string
+}
+
+type InlayMass struct {
+	Position models.GrindingPosition
+	RadiusCm float64
+	DepthMm  float64
+	Density  float64
+}
+
+type WeldPatch struct {
+	Position models.GrindingPosition
+	RadiusCm float64
+	DepthMm  float64
+}
+
 type FEMSimulator struct {
 	Bell            *models.Bell
 	Grid            *FEMGrid
@@ -75,6 +104,9 @@ type FEMSimulator struct {
 	StartTime       time.Time
 	GrindingHistory []GrindingRecord
 	LastQuality     *GridQualityReport
+	ProcessHistory  []TuningProcessRecord
+	InlayMasses     []InlayMass
+	WeldPatches     []WeldPatch
 }
 
 type VibrationMode struct {
@@ -323,13 +355,12 @@ func (s *FEMSimulator) CompareTuningProcesses(currentFreq, targetFreq float64) [
 		}
 
 		freqScore := 1.0 - math.Abs(deviationCents)/100.0
-		timeScore := 1.0 - float64(requiredTimeMin)/180.0
 		reversibilityScore := 0.0
 		if reversibility {
 			reversibilityScore = 0.5
 		}
 		overallScore := (freqScore*0.5 + harmonicity*0.25 +
-			(1.0-complexity/10.0)*0.1 + (1.0-damageRisk)*0.1 +
+			(1.0-float64(complexity)/10.0)*0.1 + (1.0-damageRisk)*0.1 +
 			reversibilityScore*0.05)
 
 		results = append(results, models.ProcessComparisonResult{
@@ -985,13 +1016,11 @@ func (s *FEMSimulator) CalculateEigenfrequencies() []float64 {
 	}
 
 	radiusM := s.Bell.DiameterCm / 200.0
-	heightM := s.Bell.HeightCm / 100.0
 	thicknessM := averageThickness / 1000.0
 
 	baseFreq := (1.0 / (2.0 * math.Pi)) *
 		math.Sqrt((BronzeYoungModulus*thicknessM*thicknessM)/
-			(BronzeDensity*radiusM*radiusM*radiusM*radiusM)) *
-		math.Sqrt(s.Bell.TargetFrequency/baseFreq)
+			(BronzeDensity*radiusM*radiusM*radiusM*radiusM))
 
 	thicknessFactor := math.Pow(averageThickness/s.Bell.ThicknessMm, 0.75)
 	massFactor := math.Sqrt(s.Bell.MassKg * 1000.0 / totalMass)

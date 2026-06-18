@@ -1,0 +1,8 @@
+﻿go : go: downloading github.com/google/uuid v1.5.0
+所在位置 行:1 字符: 117
++ ... der_task_B_202\backend ; go test ./handlers/... -count=1 2>&1 | Out-F ...
++                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (go: downloading...gle/uuid v1.5.0 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

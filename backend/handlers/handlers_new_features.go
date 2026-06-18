@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/jackc/pgx/v4"
 
 	"bianzhong-acoustic-system/database"
 	"bianzhong-acoustic-system/models"
@@ -52,10 +52,10 @@ func GetTuningProcesses(w http.ResponseWriter, r *http.Request) {
 
 func CompareTuningProcesses(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		BellID        int     `json:"bell_id"`
-		CurrentFreq   float64 `json:"current_freq"`
-		TargetFreq    float64 `json:"target_freq"`
-		ProcessTypes  []string `json:"process_types,omitempty"`
+		BellID       int      `json:"bell_id"`
+		CurrentFreq  float64  `json:"current_freq"`
+		TargetFreq   float64  `json:"target_freq"`
+		ProcessTypes []string `json:"process_types,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
@@ -116,12 +116,12 @@ func CompareTuningProcesses(w http.ResponseWriter, r *http.Request) {
 	`, req.BellID, req.ProcessTypes, resultsJSON, bestProcess, confidence)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"bell_id":        req.BellID,
-		"current_freq":   req.CurrentFreq,
-		"target_freq":    req.TargetFreq,
-		"best_process":   bestProcess,
-		"confidence":     confidence,
-		"results":        results,
+		"bell_id":      req.BellID,
+		"current_freq": req.CurrentFreq,
+		"target_freq":  req.TargetFreq,
+		"best_process": bestProcess,
+		"confidence":   confidence,
+		"results":      results,
 	})
 }
 
@@ -194,8 +194,8 @@ func ValidateEmpiricalRule(w http.ResponseWriter, r *http.Request) {
 		DeviationPercent: deviation,
 		ComputedValue:    computed,
 		ExpectedValue:    expected,
-		SampleSize:     sampleSize,
-		Confidence:     confidence,
+		SampleSize:       sampleSize,
+		Confidence:       confidence,
 	}
 
 	respondJSON(w, http.StatusOK, result)
@@ -264,8 +264,9 @@ func computeRuleValidation(rule models.EmpiricalRule, params map[string]interfac
 func GetComparisonArticles(w http.ResponseWriter, r *http.Request) {
 	category := r.URL.Query().Get("category")
 
-	var rows, err error
-	var args := []interface{}{}
+	var rows pgx.Rows
+	var err error
+	args := []interface{}{}
 	query := `
 		SELECT id, title, category, bianzhong, piano, conclusion, references
 		FROM comparison_articles
@@ -329,13 +330,13 @@ func StartVirtualTuning(w http.ResponseWriter, r *http.Request) {
 
 	session := &models.VirtualTuningSession{
 		SessionID:    sessionID,
-		BellID:     bell.ID,
-		CurrentFreq: initialFreq,
+		BellID:       bell.ID,
+		CurrentFreq:  initialFreq,
 		OriginalFreq: initialFreq,
-		TargetFreq: bell.TargetFrequency,
-		History:    make([]models.VirtualGrind, 0),
+		TargetFreq:   bell.TargetFrequency,
+		History:      make([]models.VirtualGrind, 0),
 		TotalDepthMm: 0,
-		CreatedAt:  time.Now(),
+		CreatedAt:    time.Now(),
 		LastModified: time.Now(),
 	}
 
@@ -354,8 +355,8 @@ func VirtualTuningGrind(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Position    models.GrindingPosition `json:"position"`
-		DepthMm     float64               `json:"depth_mm"`
-		ProcessType string                `json:"process_type"`
+		DepthMm     float64                 `json:"depth_mm"`
+		ProcessType string                  `json:"process_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
@@ -407,10 +408,10 @@ func VirtualTuningGrind(w http.ResponseWriter, r *http.Request) {
 	session.LastModified = time.Now()
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"session":        session,
-		"grind_result":   grind,
-		"eigenfreqs":     eigenfreqs,
-		"harmonicity":    sim.CalculateHarmonicity(),
+		"session":          session,
+		"grind_result":     grind,
+		"eigenfreqs":       eigenfreqs,
+		"harmonicity":      sim.CalculateHarmonicity(),
 		"within_tolerance": math.Abs(dev) <= bell.ToleranceCents,
 	})
 }
@@ -445,7 +446,7 @@ func VirtualTuningPlay(w http.ResponseWriter, r *http.Request) {
 		"current_freq": session.CurrentFreq,
 		"target_freq":  session.TargetFreq,
 		"harmonicity":  harmonicity,
-		"decay_rates": []float64{1.5, 2.0, 2.8, 3.5, 4.2, 5.0, 5.8, 6.5},
+		"decay_rates":  []float64{1.5, 2.0, 2.8, 3.5, 4.2, 5.0, 5.8, 6.5},
 	})
 }
 
@@ -498,7 +499,7 @@ func GetComparisonStats(w http.ResponseWriter, r *http.Request) {
 		"total_comparisons": totalComparisons,
 		"best_process_counts": map[string]int{
 			"grinding":       grindingWins,
-			"casting_inlay": castingWins,
+			"casting_inlay":  castingWins,
 			"welding_repair": weldingWins,
 		},
 	})
