@@ -1,3 +1,280 @@
+const BellVertexShader = `
+    uniform float uTime;
+    uniform int uModeOrder;
+    uniform float uModeAmplitude;
+    uniform float uBellHeight;
+    uniform float uBellRadius;
+    uniform bool uShowVibration;
+
+    varying vec3 vNormal;
+    varying vec3 vWorldPosition;
+    varying float vDisplacement;
+    varying float vTheta;
+    varying float vPhi;
+    varying vec2 vUv;
+
+    float computeModeDisplacement(float theta, float phi, int modeOrder) {
+        float disp = 0.0;
+        if (modeOrder == 0) {
+            disp = sin(float(1) * theta) * sin(phi);
+        } else if (modeOrder == 1) {
+            disp = cos(float(2) * theta) * sin(2.0 * phi);
+        } else if (modeOrder == 2) {
+            disp = sin(float(3) * theta) * cos(phi);
+        } else {
+            disp = cos(float(4) * theta) * sin(3.0 * phi);
+        }
+        float edgeFactor = sin(phi);
+        return disp * edgeFactor;
+    }
+
+    void main() {
+        vUv = uv;
+        vNormal = normalize(normalMatrix * normal);
+
+        float radius = length(position.xz);
+        vTheta = atan(position.z, position.x);
+        vPhi = 3.14159265359 * (position.y + uBellHeight * 0.5) / uBellHeight;
+        vPhi = clamp(vPhi, 0.0, 3.14159265359);
+
+        float rawDisp = computeModeDisplacement(vTheta, vPhi, uModeOrder);
+        vDisplacement = rawDisp;
+
+        vec3 newPosition = position;
+
+        if (uShowVibration) {
+            float animated = rawDisp * sin(uTime * 2.5) * uModeAmplitude;
+            vec3 radialDir = normalize(vec3(position.x, 0.0, position.z));
+            if (length(radialDir) > 0.001) {
+                newPosition += radialDir * animated * 0.8;
+                newPosition.y += animated * 0.3 * sin(vPhi);
+            }
+        }
+
+        vec4 worldPos = modelMatrix * vec4(newPosition, 1.0);
+        vWorldPosition = worldPos.xyz;
+
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+    }
+`;
+
+const BellFragmentShader = `
+    uniform float uTime;
+    uniform int uModeOrder;
+    uniform bool uShowContours;
+    uniform bool uWireframe;
+    uniform vec3 uBaseColor;
+
+    varying vec3 vNormal;
+    varying vec3 vWorldPosition;
+    varying float vDisplacement;
+    varying float vTheta;
+    varying float vPhi;
+    varying vec2 vUv;
+
+    vec3 hsv2rgb(vec3 c) {
+        vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+        vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+        return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+    }
+
+    float drawIsoline(float value, float numLines, float lineWidth) {
+        float scaled = value * numLines * 0.5 + numLines * 0.5;
+        float line = abs(fract(scaled - 0.5) - 0.5);
+        float width = fwidth(scaled) * lineWidth;
+        return 1.0 - smoothstep(0.0, width, line);
+    }
+
+    void main() {
+        vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+        float fresnel = pow(1.0 - max(dot(viewDir, vNormal), 0.0), 3.0);
+
+        vec3 bronze = uBaseColor;
+        vec3 highlight = vec3(1.0, 0.85, 0.2);
+
+        float normalizedDisp = clamp(vDisplacement * 0.5 + 0.5, 0.0, 1.0);
+        float hue = (1.0 - normalizedDisp) * 0.66;
+        vec3 modeColor = hsv2rgb(vec3(hue, 0.9, 0.9));
+
+        vec3 finalColor = mix(bronze, modeColor, 0.45);
+        finalColor += fresnel * highlight * 0.35;
+
+        if (uShowContours) {
+            float isoline1 = drawIsoline(vDisplacement, 10.0, 0.8);
+            float isoline2 = drawIsoline(vDisplacement, 20.0, 0.5);
+
+            vec3 contourColor1 = hsv2rgb(vec3(hue, 1.0, 1.0));
+            vec3 contourColor2 = vec3(1.0);
+
+            finalColor = mix(finalColor, contourColor1, isoline1 * 0.85);
+            finalColor = mix(finalColor, contourColor2, isoline2 * 0.35);
+
+            float pulse = 0.5 + 0.5 * sin(uTime * 4.0);
+            float zeroLine = drawIsoline(vDisplacement, 100.0, 1.2);
+            finalColor = mix(finalColor, vec3(1.0, 1.0, 0.5), zeroLine * 0.5 * pulse);
+        }
+
+        float ambient = 0.35;
+        vec3 lightDir = normalize(vec3(0.5, 0.8, 0.5));
+        float diffuse = max(dot(vNormal, lightDir), 0.0) * 0.65;
+        float lighting = ambient + diffuse;
+        finalColor *= lighting;
+
+        if (uWireframe) {
+            finalColor = mix(finalColor, bronze * 1.5, 0.6);
+            float gridX = abs(fract(vUv.x * 60.0) - 0.5);
+            float gridY = abs(fract(vUv.y * 60.0) - 0.5);
+            float gwx = fwidth(vUv.x * 60.0) * 0.8;
+            float gwy = fwidth(vUv.y * 60.0) * 0.8;
+            float grid = 1.0 - min(smoothstep(0.0, gwx, gridX), smoothstep(0.0, gwy, gridY));
+            finalColor = mix(finalColor, vec3(1.0, 0.9, 0.5), grid * 0.8);
+        }
+
+        gl_FragColor = vec4(finalColor, 1.0);
+    }
+`;
+
+const GrindingVertexShader = `
+    uniform float uTime;
+    uniform float uDepth;
+
+    varying vec3 vNormal;
+    varying vec3 vWorldPosition;
+    varying float vDist;
+
+    void main() {
+        vNormal = normalize(normalMatrix * normal);
+        vDist = length(position);
+
+        vec3 newPos = position;
+        float pulse = 1.0 + 0.15 * sin(uTime * 3.0);
+        newPos *= pulse;
+
+        vec4 worldPos = modelMatrix * vec4(newPos, 1.0);
+        vWorldPosition = worldPos.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+    }
+`;
+
+const GrindingFragmentShader = `
+    uniform float uTime;
+    uniform float uDepth;
+
+    varying vec3 vNormal;
+    varying vec3 vWorldPosition;
+    varying float vDist;
+
+    void main() {
+        float pulse = 0.6 + 0.4 * sin(uTime * 4.0);
+        vec3 coreColor = vec3(1.0, 0.2, 0.2);
+        vec3 edgeColor = vec3(1.0, 0.8, 0.0);
+
+        float fade = 1.0 - smoothstep(0.0, 1.0, vDist);
+        vec3 color = mix(edgeColor, coreColor, fade);
+        color *= pulse;
+
+        float alpha = 0.75 + 0.25 * sin(uTime * 5.0);
+        gl_FragColor = vec4(color, alpha);
+    }
+`;
+
+const RingVertexShader = `
+    uniform float uTime;
+
+    varying float vAngle;
+    varying vec3 vWorldPosition;
+
+    void main() {
+        float angle = atan(position.y, position.x);
+        vAngle = angle;
+
+        float pulse = 1.0 + 0.1 * sin(uTime * 2.0 + angle * 3.0);
+        vec3 newPos = position * pulse;
+
+        vec4 worldPos = modelMatrix * vec4(newPos, 1.0);
+        vWorldPosition = worldPos.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+    }
+`;
+
+const RingFragmentShader = `
+    uniform float uTime;
+    varying float vAngle;
+    varying vec3 vWorldPosition;
+
+    void main() {
+        float scan = 0.5 + 0.5 * sin(uTime * 3.0 - vAngle * 4.0);
+        vec3 color = mix(vec3(1.0, 0.0, 0.0), vec3(1.0, 0.6, 0.0), scan);
+        float alpha = 0.4 + 0.3 * scan;
+        gl_FragColor = vec4(color, alpha);
+    }
+`;
+
+const DecorativeRingVertexShader = `
+    uniform float uTime;
+    uniform float uRingY;
+    uniform float uRingScale;
+
+    varying vec3 vNormal;
+    varying vec3 vWorldPosition;
+    varying float vRingFactor;
+
+    void main() {
+        vNormal = normalize(normalMatrix * normal);
+        vRingFactor = uRingScale;
+
+        vec3 newPos = position;
+        vec4 worldPos = modelMatrix * vec4(newPos, 1.0);
+        vWorldPosition = worldPos.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+    }
+`;
+
+const DecorativeRingFragmentShader = `
+    uniform float uTime;
+    uniform vec3 uBaseColor;
+
+    varying vec3 vNormal;
+    varying vec3 vWorldPosition;
+    varying float vRingFactor;
+
+    void main() {
+        vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+        float fresnel = pow(1.0 - max(dot(viewDir, vNormal), 0.0), 3.0);
+
+        vec3 bronze = uBaseColor * 0.85;
+        vec3 highlight = vec3(1.0, 0.9, 0.3);
+
+        float ambient = 0.35;
+        vec3 lightDir = normalize(vec3(0.5, 0.8, 0.5));
+        float diffuse = max(dot(vNormal, lightDir), 0.0) * 0.7;
+        vec3 color = bronze * (ambient + diffuse);
+        color += fresnel * highlight * 0.5;
+
+        float specularBase = pow(max(dot(reflect(-lightDir, vNormal), viewDir), 0.0), 48.0);
+        color += vec3(1.0, 0.95, 0.6) * specularBase * 0.6;
+
+        gl_FragColor = vec4(color, 1.0);
+    }
+`;
+
+function isMobileDevice() {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || navigator.vendor || '';
+    return /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile/i.test(ua) ||
+           (typeof window !== 'undefined' && window.innerWidth < 768);
+}
+
+function getLowPowerMode() {
+    if (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) {
+        if (navigator.hardwareConcurrency <= 4) return true;
+    }
+    if (typeof navigator !== 'undefined' && navigator.deviceMemory) {
+        if (navigator.deviceMemory <= 4) return true;
+    }
+    return isMobileDevice();
+}
+
 class Bell3DViewer {
     constructor(containerId) {
         this.container = document.getElementById(containerId);
@@ -5,7 +282,7 @@ class Bell3DViewer {
         this.camera = null;
         this.renderer = null;
         this.bellMesh = null;
-        this.contourLines = [];
+        this.bellMaterial = null;
         this.grindingMarkers = [];
         this.modeOrder = 0;
         this.showContours = true;
@@ -20,6 +297,17 @@ class Bell3DViewer {
         this.previousMousePosition = { x: 0, y: 0 };
         this.cameraAngle = { theta: 0.5, phi: 0.8 };
         this.cameraDistance = 300;
+        this.clock = new THREE.Clock();
+        this.uniforms = null;
+
+        this.isMobile = isMobileDevice();
+        this.lowPower = getLowPowerMode();
+        this.lodLevel = this.lowPower ? 2 : (this.isMobile ? 1 : 0);
+        this.frameTimes = [];
+        this.fps = 60;
+        this.lastFpsUpdate = 0;
+        this.frameCount = 0;
+        this.adaptiveLodTriggered = false;
 
         this.init();
     }
@@ -35,38 +323,61 @@ class Bell3DViewer {
         this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 2000);
         this.updateCameraPosition();
 
-        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        let maxPixelRatio = 2;
+        if (this.lodLevel >= 2) {
+            maxPixelRatio = 1;
+        } else if (this.lodLevel >= 1) {
+            maxPixelRatio = Math.min(window.devicePixelRatio, 1.5);
+        }
+
+        this.renderer = new THREE.WebGLRenderer({
+            antialias: this.lodLevel < 2,
+            powerPreference: "high-performance",
+            preserveDrawingBuffer: false,
+            alpha: false
+        });
         this.renderer.setSize(width, height);
-        this.renderer.setPixelRatio(window.devicePixelRatio);
-        this.renderer.shadowMap.enabled = true;
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
+        if (this.lodLevel < 1) {
+            this.renderer.shadowMap.enabled = true;
+        } else {
+            this.renderer.shadowMap.enabled = false;
+        }
         this.container.appendChild(this.renderer.domElement);
 
         this.setupLights();
-        this.setupGrid();
+        if (this.lodLevel < 2) {
+            this.setupGrid();
+        }
 
         window.addEventListener('resize', () => this.onResize());
         this.renderer.domElement.addEventListener('mousedown', (e) => this.onMouseDown(e));
         this.renderer.domElement.addEventListener('mousemove', (e) => this.onMouseMove(e));
         this.renderer.domElement.addEventListener('mouseup', () => this.onMouseUp());
-        this.renderer.domElement.addEventListener('wheel', (e) => this.onWheel(e));
+        this.renderer.domElement.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+        if (this.isMobile) {
+            this.renderer.domElement.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
+            this.renderer.domElement.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
+            this.renderer.domElement.addEventListener('touchend', () => this.onTouchEnd());
+        }
 
         this.animate();
     }
 
     setupLights() {
-        const ambientLight = new THREE.AmbientLight(0x404060, 0.4);
+        const ambientLight = new THREE.AmbientLight(0x404060, 0.6);
         this.scene.add(ambientLight);
 
-        const mainLight = new THREE.DirectionalLight(0xffd700, 0.8);
+        const mainLight = new THREE.DirectionalLight(0xffd700, 1.0);
         mainLight.position.set(100, 200, 100);
         mainLight.castShadow = true;
         this.scene.add(mainLight);
 
-        const fillLight = new THREE.DirectionalLight(0x4488ff, 0.4);
+        const fillLight = new THREE.DirectionalLight(0x4488ff, 0.5);
         fillLight.position.set(-100, 100, -100);
         this.scene.add(fillLight);
 
-        const rimLight = new THREE.DirectionalLight(0xff8800, 0.3);
+        const rimLight = new THREE.DirectionalLight(0xff8800, 0.4);
         rimLight.position.set(0, -100, 100);
         this.scene.add(rimLight);
     }
@@ -89,6 +400,29 @@ class Bell3DViewer {
         this.camera.lookAt(0, 0, 0);
     }
 
+    createBellShaderMaterial() {
+        this.uniforms = {
+            uTime: { value: 0 },
+            uModeOrder: { value: 0 },
+            uModeAmplitude: { value: 3.0 },
+            uBellHeight: { value: 80.0 },
+            uBellRadius: { value: 20.0 },
+            uShowVibration: { value: true },
+            uShowContours: { value: true },
+            uWireframe: { value: false },
+            uBaseColor: { value: new THREE.Color(0xb8860b) }
+        };
+
+        this.bellMaterial = new THREE.ShaderMaterial({
+            uniforms: this.uniforms,
+            vertexShader: BellVertexShader,
+            fragmentShader: BellFragmentShader,
+            side: THREE.DoubleSide
+        });
+
+        return this.bellMaterial;
+    }
+
     createBellGeometry(bell) {
         this.currentBell = bell;
         const height = bell.height_cm || 80;
@@ -96,8 +430,25 @@ class Bell3DViewer {
         const topRadius = bottomRadius * 0.6;
         const thickness = (bell.thickness_mm || 15) / 10;
 
-        const segments = 64;
-        const heightSegments = 32;
+        if (this.uniforms) {
+            this.uniforms.uBellHeight.value = height;
+            this.uniforms.uBellRadius.value = bottomRadius;
+        }
+
+        let segments, heightSegments;
+        switch (this.lodLevel) {
+            case 2:
+                segments = 32;
+                heightSegments = 16;
+                break;
+            case 1:
+                segments = 64;
+                heightSegments = 32;
+                break;
+            default:
+                segments = 96;
+                heightSegments = 48;
+        }
 
         const outerPoints = [];
         const innerPoints = [];
@@ -107,10 +458,10 @@ class Bell3DViewer {
             const y = -height / 2 + t * height;
             const profile = 1 - 0.15 * Math.sin(t * Math.PI);
             const outerR = (topRadius + (bottomRadius - topRadius) * t) * profile;
-            const innerR = outerR - thickness;
+            const innerR = Math.max(outerR - thickness, 1);
 
             outerPoints.push(new THREE.Vector2(outerR, y));
-            innerPoints.push(new THREE.Vector2(Math.max(innerR, 1), y));
+            innerPoints.push(new THREE.Vector2(innerR, y));
         }
 
         const outerGeom = new THREE.LatheGeometry(outerPoints, segments);
@@ -119,31 +470,28 @@ class Bell3DViewer {
 
         const topOuterR = topRadius;
         const topInnerR = Math.max(topRadius - thickness, 1);
-        const topRingGeom = new THREE.RingGeometry(topInnerR, topOuterR, segments);
+        const topRingSegments = this.lodLevel >= 2 ? 32 : segments;
+        const topRingGeom = new THREE.RingGeometry(topInnerR, topOuterR, topRingSegments);
         topRingGeom.rotateX(-Math.PI / 2);
         topRingGeom.translate(0, height / 2, 0);
 
         const bottomOuterR = bottomRadius;
         const bottomInnerR = Math.max(bottomRadius - thickness, 1);
-        const bottomRingGeom = new THREE.RingGeometry(bottomInnerR, bottomOuterR, segments);
+        const bottomRingGeom = new THREE.RingGeometry(bottomInnerR, bottomOuterR, topRingSegments);
         bottomRingGeom.rotateX(Math.PI / 2);
         bottomRingGeom.translate(0, -height / 2, 0);
 
-        const bronzeMaterial = new THREE.MeshPhongMaterial({
-            color: 0xb8860b,
-            shininess: 80,
-            specular: 0xffd700,
-            wireframe: this.wireframe,
-            side: THREE.DoubleSide
-        });
+        const material = this.createBellShaderMaterial();
 
-        const outerMesh = new THREE.Mesh(outerGeom, bronzeMaterial);
-        const innerMesh = new THREE.Mesh(innerGeom, bronzeMaterial);
-        const topRing = new THREE.Mesh(topRingGeom, bronzeMaterial);
-        const bottomRing = new THREE.Mesh(bottomRingGeom, bronzeMaterial);
+        const outerMesh = new THREE.Mesh(outerGeom, material);
+        const innerMesh = new THREE.Mesh(innerGeom, material);
+        const topRing = new THREE.Mesh(topRingGeom, material);
+        const bottomRing = new THREE.Mesh(bottomRingGeom, material);
 
-        outerMesh.castShadow = true;
-        outerMesh.receiveShadow = true;
+        if (this.lodLevel < 1) {
+            outerMesh.castShadow = true;
+            outerMesh.receiveShadow = true;
+        }
 
         this.bellMesh = new THREE.Group();
         this.bellMesh.add(outerMesh);
@@ -151,23 +499,37 @@ class Bell3DViewer {
         this.bellMesh.add(topRing);
         this.bellMesh.add(bottomRing);
 
-        this.addDecorativeRings(height, bottomRadius, topRadius, segments);
+        if (this.lodLevel < 2) {
+            this.addDecorativeRings(height, bottomRadius, topRadius, segments);
+        }
 
         this.scene.add(this.bellMesh);
     }
 
     addDecorativeRings(height, bottomRadius, topRadius, segments) {
-        const ringMaterial = new THREE.MeshPhongMaterial({
-            color: 0x8b6914,
-            shininess: 100,
-            specular: 0xffea00
+        let torusSegments = this.lodLevel >= 1 ? 16 : 32;
+        let torusRadialSegments = this.lodLevel >= 1 ? 4 : 8;
+
+        const ringUniforms = {
+            uTime: { value: 0 },
+            uRingY: { value: 0 },
+            uRingScale: { value: 1.0 },
+            uBaseColor: { value: new THREE.Color(0x8b6914) }
+        };
+
+        const ringMaterial = new THREE.ShaderMaterial({
+            uniforms: ringUniforms,
+            vertexShader: DecorativeRingVertexShader,
+            fragmentShader: DecorativeRingFragmentShader
         });
+
+        this.sharedRingUniforms = ringUniforms;
 
         for (let t = 0.2; t < 0.9; t += 0.2) {
             const y = -height / 2 + t * height;
             const r = (topRadius + (bottomRadius - topRadius) * t) * (1 - 0.15 * Math.sin(t * Math.PI));
 
-            const ringGeom = new THREE.TorusGeometry(r, 0.5, 8, segments);
+            const ringGeom = new THREE.TorusGeometry(r, 0.5, torusRadialSegments, torusSegments);
             ringGeom.rotateX(Math.PI / 2);
             ringGeom.translate(0, y, 0);
 
@@ -176,251 +538,43 @@ class Bell3DViewer {
         }
     }
 
-    generateModeShapeData(modeOrder) {
-        if (!this.currentBell) return [];
-
-        const points = [];
-        const height = this.currentBell.height_cm || 80;
-        const bottomRadius = (this.currentBell.diameter_cm || 40) / 2;
-        const topRadius = bottomRadius * 0.6;
-        const segments = 48;
-        const heightSegs = 24;
-
-        for (let i = 0; i <= heightSegs; i++) {
-            const t = i / heightSegs;
-            const y = -height / 2 + t * height;
-            const profile = 1 - 0.15 * Math.sin(t * Math.PI);
-            const r = (topRadius + (bottomRadius - topRadius) * t) * profile;
-
-            for (let j = 0; j < segments; j++) {
-                const theta = (j / segments) * Math.PI * 2;
-                const phi = t * Math.PI;
-
-                let displacement;
-                switch (modeOrder % 4) {
-                    case 0:
-                        displacement = Math.sin((modeOrder + 1) * theta) * Math.sin(phi);
-                        break;
-                    case 1:
-                        displacement = Math.cos((modeOrder + 1) * theta) * Math.sin(2 * phi);
-                        break;
-                    case 2:
-                        displacement = Math.sin((modeOrder + 1) * theta) * Math.cos(phi);
-                        break;
-                    case 3:
-                        displacement = Math.cos((modeOrder + 1) * theta) * Math.sin(3 * phi);
-                        break;
-                }
-
-                const edgeFactor = Math.sin(t * Math.PI);
-                displacement *= edgeFactor;
-
-                points.push({
-                    x: r * Math.cos(theta),
-                    y: y,
-                    z: r * Math.sin(theta),
-                    displacement: displacement,
-                    stress: Math.abs(displacement) * (1 + Math.random() * 0.2)
-                });
-            }
-        }
-
-        return points;
-    }
-
-    displacementToColor(displacement, maxDisp) {
-        const normalized = (displacement + maxDisp) / (2 * maxDisp);
-        const clamped = Math.max(0, Math.min(1, normalized));
-
-        const hue = (1 - clamped) * 0.66;
-        const color = new THREE.Color();
-        color.setHSL(hue, 1, 0.5);
-        return color;
-    }
-
-    createContourLines(modeOrder) {
-        this.clearContourLines();
-
-        const points = this.generateModeShapeData(modeOrder);
-        if (points.length === 0) return;
-
-        let maxDisp = 0;
-        points.forEach(p => {
-            maxDisp = Math.max(maxDisp, Math.abs(p.displacement));
-        });
-        if (maxDisp === 0) maxDisp = 1;
-
-        const numContours = 12;
-        const contourLevels = [];
-        for (let i = 0; i < numContours; i++) {
-            contourLevels.push(-maxDisp + (2 * maxDisp * i) / (numContours - 1));
-        }
-
-        const height = this.currentBell.height_cm || 80;
-        const bottomRadius = (this.currentBell.diameter_cm || 40) / 2;
-        const topRadius = bottomRadius * 0.6;
-        const segments = 96;
-        const heightSegs = 48;
-
-        const displacementField = (theta, t) => {
-            const phi = t * Math.PI;
-            let displacement;
-            switch (modeOrder % 4) {
-                case 0: displacement = Math.sin((modeOrder + 1) * theta) * Math.sin(phi); break;
-                case 1: displacement = Math.cos((modeOrder + 1) * theta) * Math.sin(2 * phi); break;
-                case 2: displacement = Math.sin((modeOrder + 1) * theta) * Math.cos(phi); break;
-                case 3: displacement = Math.cos((modeOrder + 1) * theta) * Math.sin(3 * phi); break;
-            }
-            return displacement * Math.sin(t * Math.PI);
-        };
-
-        contourLevels.forEach((level, levelIdx) => {
-            const linePoints = [];
-
-            for (let i = 0; i < heightSegs; i++) {
-                for (let j = 0; j < segments; j++) {
-                    const t1 = i / heightSegs;
-                    const t2 = (i + 1) / heightSegs;
-                    const theta1 = (j / segments) * Math.PI * 2;
-                    const theta2 = ((j + 1) / segments) * Math.PI * 2;
-
-                    const d00 = displacementField(theta1, t1);
-                    const d10 = displacementField(theta2, t1);
-                    const d01 = displacementField(theta1, t2);
-                    const d11 = displacementField(theta2, t2);
-
-                    const crossings = [];
-
-                    if ((d00 - level) * (d10 - level) < 0) {
-                        const alpha = (level - d00) / (d10 - d00);
-                        crossings.push({ theta: theta1 + alpha * (theta2 - theta1), t: t1 });
-                    }
-                    if ((d01 - level) * (d11 - level) < 0) {
-                        const alpha = (level - d01) / (d11 - d01);
-                        crossings.push({ theta: theta1 + alpha * (theta2 - theta1), t: t2 });
-                    }
-                    if ((d00 - level) * (d01 - level) < 0) {
-                        const alpha = (level - d00) / (d01 - d00);
-                        crossings.push({ theta: theta1, t: t1 + alpha * (t2 - t1) });
-                    }
-                    if ((d10 - level) * (d11 - level) < 0) {
-                        const alpha = (level - d10) / (d11 - d10);
-                        crossings.push({ theta: theta2, t: t1 + alpha * (t2 - t1) });
-                    }
-
-                    crossings.forEach(c => {
-                        const y = -height / 2 + c.t * height;
-                        const profile = 1 - 0.15 * Math.sin(c.t * Math.PI);
-                        const r = (topRadius + (bottomRadius - topRadius) * c.t) * profile + 0.3;
-
-                        linePoints.push(new THREE.Vector3(
-                            r * Math.cos(c.theta),
-                            y,
-                            r * Math.sin(c.theta)
-                        ));
-                    });
-                }
-            }
-
-            if (linePoints.length > 1) {
-                const color = this.displacementToColor(level, maxDisp);
-                const geometry = new THREE.BufferGeometry().setFromPoints(linePoints);
-                const material = new THREE.LineBasicMaterial({
-                    color: color,
-                    transparent: true,
-                    opacity: 0.85,
-                    linewidth: 2
-                });
-
-                const lines = new THREE.LinePoints(geometry, material);
-                this.contourLines.push(lines);
-                this.scene.add(lines);
-            }
-        });
-
-        this.updateBellColorsWithDisplacement(modeOrder);
-    }
-
-    updateBellColorsWithDisplacement(modeOrder) {
-        if (!this.bellMesh) return;
-
-        this.bellMesh.traverse((child) => {
-            if (child.isMesh && child.geometry && child.geometry.attributes && child.geometry.attributes.position) {
-                const positions = child.geometry.attributes.position;
-                const colors = new Float32Array(positions.count * 3);
-
-                const height = this.currentBell.height_cm || 80;
-
-                for (let i = 0; i < positions.count; i++) {
-                    const x = positions.getX(i);
-                    const y = positions.getY(i);
-                    const z = positions.getZ(i);
-
-                    const theta = Math.atan2(z, x);
-                    const t = (y + height / 2) / height;
-                    const phi = t * Math.PI;
-
-                    let displacement;
-                    switch (modeOrder % 4) {
-                        case 0: displacement = Math.sin((modeOrder + 1) * theta) * Math.sin(phi); break;
-                        case 1: displacement = Math.cos((modeOrder + 1) * theta) * Math.sin(2 * phi); break;
-                        case 2: displacement = Math.sin((modeOrder + 1) * theta) * Math.cos(phi); break;
-                        case 3: displacement = Math.cos((modeOrder + 1) * theta) * Math.sin(3 * phi); break;
-                    }
-                    displacement *= Math.sin(t * Math.PI);
-
-                    const color = this.displacementToColor(displacement, 1);
-
-                    if (child.material.wireframe) {
-                        colors[i * 3] = 0.75;
-                        colors[i * 3 + 1] = 0.53;
-                        colors[i * 3 + 2] = 0.04;
-                    } else {
-                        const baseR = 0.72, baseG = 0.53, baseB = 0.04;
-                        const blend = 0.35;
-                        colors[i * 3] = baseR * (1 - blend) + color.r * blend;
-                        colors[i * 3 + 1] = baseG * (1 - blend) + color.g * blend;
-                        colors[i * 3 + 2] = baseB * (1 - blend) + color.b * blend;
-                    }
-                }
-
-                child.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-                child.material.vertexColors = true;
-                child.material.needsUpdate = true;
-            }
-        });
-    }
-
     addGrindingMarker(position, depth = 0.5) {
         const radius = 1.5 + depth * 0.5;
 
+        const uniforms = {
+            uTime: { value: 0 },
+            uDepth: { value: depth }
+        };
+
         const markerGeom = new THREE.SphereGeometry(radius, 32, 32);
-        const markerMat = new THREE.MeshBasicMaterial({
-            color: 0xff3333,
+        const markerMat = new THREE.ShaderMaterial({
+            uniforms: uniforms,
+            vertexShader: GrindingVertexShader,
+            fragmentShader: GrindingFragmentShader,
             transparent: true,
-            opacity: 0.8
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
         });
         const marker = new THREE.Mesh(markerGeom, markerMat);
         marker.position.set(position.x, position.y, position.z);
-        marker.userData = { type: 'grinding', depth: depth, position: position };
 
-        const ringGeom = new THREE.RingGeometry(radius, radius * 1.5, 32);
-        const ringMat = new THREE.MeshBasicMaterial({
-            color: 0xff0000,
+        const ringGeom = new THREE.RingGeometry(radius, radius * 1.8, 64);
+        const ringMat = new THREE.ShaderMaterial({
+            uniforms: { uTime: { value: 0 } },
+            vertexShader: RingVertexShader,
+            fragmentShader: RingFragmentShader,
             transparent: true,
-            opacity: 0.6,
-            side: THREE.DoubleSide
+            side: THREE.DoubleSide,
+            depthWrite: false
         });
         const ring = new THREE.Mesh(ringGeom, ringMat);
-
-        const dir = new THREE.Vector3(position.x, 0, position.z).normalize();
         ring.position.copy(marker.position);
         ring.lookAt(new THREE.Vector3(0, position.y, 0));
 
         const group = new THREE.Group();
         group.add(marker);
         group.add(ring);
-        group.userData = marker.userData;
+        group.userData = { type: 'grinding', depth: depth, position: position, uniforms: [uniforms, ringMat.uniforms] };
 
         this.grindingMarkers.push(group);
         this.scene.add(group);
@@ -433,34 +587,17 @@ class Bell3DViewer {
         this.grindingMarkers = [];
     }
 
-    clearContourLines() {
-        this.contourLines.forEach(l => this.scene.remove(l));
-        this.contourLines = [];
-    }
-
-    clearBell() {
-        if (this.bellMesh) {
-            this.scene.remove(this.bellMesh);
-            this.bellMesh = null;
-        }
-        this.clearContourLines();
-        this.clearGrindingMarkers();
-    }
-
     setModeOrder(order) {
         this.modeOrder = order;
-        if (this.showContours && this.currentBell) {
-            this.createContourLines(order);
+        if (this.uniforms) {
+            this.uniforms.uModeOrder.value = order;
         }
     }
 
     toggleContours(show) {
         this.showContours = show;
-        if (show && this.currentBell) {
-            this.createContourLines(this.modeOrder);
-        } else {
-            this.clearContourLines();
-            this.resetBellColors();
+        if (this.uniforms) {
+            this.uniforms.uShowContours.value = show;
         }
     }
 
@@ -473,25 +610,19 @@ class Bell3DViewer {
 
     toggleWireframe(wireframe) {
         this.wireframe = wireframe;
-        if (this.bellMesh) {
-            this.bellMesh.traverse((child) => {
-                if (child.isMesh && child.material) {
-                    child.material.wireframe = wireframe;
-                    child.material.needsUpdate = true;
-                }
-            });
+        if (this.uniforms) {
+            this.uniforms.uWireframe.value = wireframe;
         }
     }
 
-    resetBellColors() {
-        if (!this.bellMesh) return;
-        this.bellMesh.traverse((child) => {
-            if (child.isMesh && child.material) {
-                child.material.vertexColors = false;
-                child.material.color.set(0xb8860b);
-                child.material.needsUpdate = true;
-            }
-        });
+    clearBell() {
+        if (this.bellMesh) {
+            this.scene.remove(this.bellMesh);
+            this.bellMesh = null;
+        }
+        this.clearGrindingMarkers();
+        this.bellMaterial = null;
+        this.uniforms = null;
     }
 
     onResize() {
@@ -535,23 +666,99 @@ class Bell3DViewer {
         this.updateCameraPosition();
     }
 
+    onTouchStart(e) {
+        if (e.touches.length === 1) {
+            e.preventDefault();
+            this.isDragging = true;
+            this.previousMousePosition = {
+                x: e.touches[0].clientX,
+                y: e.touches[0].clientY
+            };
+        }
+    }
+
+    onTouchMove(e) {
+        if (e.touches.length === 1 && this.isDragging) {
+            e.preventDefault();
+            const deltaX = e.touches[0].clientX - this.previousMousePosition.x;
+            const deltaY = e.touches[0].clientY - this.previousMousePosition.y;
+
+            this.cameraAngle.theta += deltaX * 0.005;
+            this.cameraAngle.phi = Math.max(0.1, Math.min(Math.PI - 0.1, this.cameraAngle.phi + deltaY * 0.005));
+
+            this.updateCameraPosition();
+            this.previousMousePosition = {
+                x: e.touches[0].clientX,
+                y: e.touches[0].clientY
+            };
+        }
+    }
+
+    onTouchEnd() {
+        this.isDragging = false;
+    }
+
+    updateFps(now) {
+        this.frameCount++;
+        if (now - this.lastFpsUpdate >= 1000) {
+            this.fps = this.frameCount * 1000 / (now - this.lastFpsUpdate);
+            this.frameCount = 0;
+            this.lastFpsUpdate = now;
+
+            if (!this.adaptiveLodTriggered && this.lodLevel < 2 && this.fps < 25) {
+                this.adaptiveLodTriggered = true;
+                this.triggerAdaptiveDowngrade();
+            }
+        }
+    }
+
+    triggerAdaptiveDowngrade() {
+        this.lodLevel = Math.min(2, this.lodLevel + 1);
+        if (this.currentBell) {
+            const bell = this.currentBell;
+            this.clearBell();
+            this.createBellGeometry(bell);
+        }
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, this.lodLevel >= 2 ? 1 : 1.5));
+        this.renderer.shadowMap.enabled = this.lodLevel < 1;
+        if (this.lodLevel >= 2) {
+            this.setupLights = function() {
+                const ambientLight = new THREE.AmbientLight(0x404060, 0.6);
+                this.scene.add(ambientLight);
+                const mainLight = new THREE.DirectionalLight(0xffd700, 0.8);
+                mainLight.position.set(100, 200, 100);
+                this.scene.add(mainLight);
+            }.bind(this);
+        }
+    }
+
     animate() {
         requestAnimationFrame(() => this.animate());
+
+        const now = performance.now();
+        this.updateFps(now);
+
+        const elapsed = this.clock.getElapsedTime();
+
+        if (this.uniforms) {
+            this.uniforms.uTime.value = elapsed;
+        }
+
+        if (this.sharedRingUniforms) {
+            this.sharedRingUniforms.uTime.value = elapsed;
+        }
+
+        this.grindingMarkers.forEach(group => {
+            if (group.userData && group.userData.uniforms) {
+                group.userData.uniforms.forEach(u => {
+                    if (u.uTime) u.uTime.value = elapsed;
+                });
+            }
+        });
 
         if (this.autoRotate && !this.isDragging) {
             this.cameraAngle.theta += 0.003;
             this.updateCameraPosition();
-        }
-
-        if (this.grindingMarkers) {
-            const time = Date.now() * 0.003;
-            this.grindingMarkers.forEach((m, idx) => {
-                if (m.children[1]) {
-                    m.children[1].rotation.z = time + idx;
-                    const scale = 1 + 0.15 * Math.sin(time * 2 + idx);
-                    m.children[1].scale.set(scale, scale, scale);
-                }
-            });
         }
 
         this.renderer.render(this.scene, this.camera);

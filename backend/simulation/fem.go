@@ -15,12 +15,23 @@ const (
 	BronzePoissonRatio   = 0.34
 	SpeedOfSoundBronze   = 3500.0
 	GridResolution       = 20
+
+	MinThicknessRatio    = 0.4
+	MaxThicknessGradient = 0.3
+	MaxDistortedElementRatio = 0.08
+	RebuildSmoothingKernel = 3
+
+	MaxRebuildRetries    = 3
+	MinConnectedNodeRatio = 0.6
+	TopologyCheckMask    = 0x4
 )
 
 type FEMGrid struct {
 	Nodes     [][][]FEMNode
 	Nx, Ny, Nz int
 	Dx, Dy, Dz float64
+	Generation  int
+	RebuildCount int
 }
 
 type FEMNode struct {
@@ -33,13 +44,37 @@ type FEMNode struct {
 	IsActive       bool
 	Grinded        bool
 	OriginalThickness float64
+	QualityFlag    int
+}
+
+type GrindingRecord struct {
+	Position models.GrindingPosition
+	DepthMm  float64
+	Time     time.Time
+}
+
+type GridQualityReport struct {
+	AverageThickness     float64
+	ThicknessStdDev      float64
+	MaxGradient          float64
+	DistortedCount       int
+	DistortedRatio       float64
+	ActiveNodeCount      int
+	ThicknessViolations  int
+	ShouldRebuild        bool
+	RebuildReason        string
+	LargestComponentSize int
+	ConnectedRatio       float64
+	TopologyBroken       bool
 }
 
 type FEMSimulator struct {
-	Bell       *models.Bell
-	Grid       *FEMGrid
-	Modes      []VibrationMode
-	StartTime  time.Time
+	Bell            *models.Bell
+	Grid            *FEMGrid
+	Modes           []VibrationMode
+	StartTime       time.Time
+	GrindingHistory []GrindingRecord
+	LastQuality     *GridQualityReport
 }
 
 type VibrationMode struct {
@@ -51,8 +86,9 @@ type VibrationMode struct {
 
 func NewFEMSimulator(bell *models.Bell) *FEMSimulator {
 	return &FEMSimulator{
-		Bell:      bell,
-		StartTime: time.Now(),
+		Bell:            bell,
+		StartTime:       time.Now(),
+		GrindingHistory: make([]GrindingRecord, 0),
 	}
 }
 
@@ -69,6 +105,8 @@ func (s *FEMSimulator) GenerateGrid() *FEMGrid {
 	grid := &FEMGrid{
 		Nx: nx, Ny: ny, Nz: nz,
 		Dx: dx, Dy: dy, Dz: dz,
+		Generation:   1,
+		RebuildCount: 0,
 	}
 
 	grid.Nodes = make([][][]FEMNode, nx)
@@ -93,6 +131,7 @@ func (s *FEMSimulator) GenerateGrid() *FEMGrid {
 					OriginalThickness: thicknessAtPoint,
 					IsActive:          isActive,
 					Grinded:           false,
+					QualityFlag:       0,
 				}
 			}
 		}
@@ -102,11 +141,484 @@ func (s *FEMSimulator) GenerateGrid() *FEMGrid {
 	return grid
 }
 
-func (s *FEMSimulator) ApplyGrinding(pos models.GrindingPosition, depthMm float64) {
+func (s *FEMSimulator) EvaluateGridQuality() *GridQualityReport {
 	if s.Grid == nil {
-		s.GenerateGrid()
+		return &GridQualityReport{ShouldRebuild: true, RebuildReason: "grid_not_initialized"}
 	}
 
+	report := &GridQualityReport{}
+	thicknesses := make([]float64, 0)
+	activeCount := 0
+	violations := 0
+
+	for i := 0; i < s.Grid.Nx; i++ {
+		for j := 0; j < s.Grid.Ny; j++ {
+			for k := 0; k < s.Grid.Nz; k++ {
+				node := &s.Grid.Nodes[i][j][k]
+				node.QualityFlag = 0
+				if !node.IsActive {
+					continue
+				}
+				activeCount++
+				thicknesses = append(thicknesses, node.Thickness)
+
+				minAllowed := node.OriginalThickness * MinThicknessRatio
+				if node.Thickness < minAllowed {
+					violations++
+					node.QualityFlag |= 1
+				}
+			}
+		}
+	}
+
+	report.ActiveNodeCount = activeCount
+	report.ThicknessViolations = violations
+
+	if len(thicknesses) == 0 {
+		report.ShouldRebuild = true
+		report.RebuildReason = "no_active_nodes"
+		s.LastQuality = report
+		return report
+	}
+
+	var sum, sumSq float64
+	for _, t := range thicknesses {
+		sum += t
+		sumSq += t * t
+	}
+	n := float64(len(thicknesses))
+	report.AverageThickness = sum / n
+	report.ThicknessStdDev = math.Sqrt(sumSq/n - report.AverageThickness*report.AverageThickness)
+
+	maxGrad := 0.0
+	distorted := 0
+	for i := 0; i < s.Grid.Nx; i++ {
+		for j := 0; j < s.Grid.Ny; j++ {
+			for k := 0; k < s.Grid.Nz; k++ {
+				node := s.Grid.Nodes[i][j][k]
+				if !node.IsActive {
+					continue
+				}
+				neighbors := 0
+				gradSum := 0.0
+
+				if i+1 < s.Grid.Nx && s.Grid.Nodes[i+1][j][k].IsActive {
+					g := math.Abs(node.Thickness - s.Grid.Nodes[i+1][j][k].Thickness) / s.Grid.Dx
+					gradSum += g
+					neighbors++
+				}
+				if j+1 < s.Grid.Ny && s.Grid.Nodes[i][j+1][k].IsActive {
+					g := math.Abs(node.Thickness - s.Grid.Nodes[i][j+1][k].Thickness) / s.Grid.Dy
+					gradSum += g
+					neighbors++
+				}
+				if k+1 < s.Grid.Nz && s.Grid.Nodes[i][j][k+1].IsActive {
+					g := math.Abs(node.Thickness - s.Grid.Nodes[i][j][k+1].Thickness) / s.Grid.Dz
+					gradSum += g
+					neighbors++
+				}
+
+				if neighbors > 0 {
+					avgGrad := gradSum / float64(neighbors)
+					if avgGrad > maxGrad {
+						maxGrad = avgGrad
+					}
+					if avgGrad > MaxThicknessGradient {
+						distorted++
+						s.Grid.Nodes[i][j][k].QualityFlag |= 2
+					}
+				}
+			}
+		}
+	}
+
+	report.MaxGradient = maxGrad
+	report.DistortedCount = distorted
+	if activeCount > 0 {
+		report.DistortedRatio = float64(distorted) / float64(activeCount)
+	}
+
+	report.LargestComponentSize, report.ConnectedRatio, report.TopologyBroken = s.checkConnectivity()
+
+	switch {
+	case report.TopologyBroken:
+		report.ShouldRebuild = true
+		report.RebuildReason = fmt.Sprintf("topology_broken_connected_ratio_%.3f", report.ConnectedRatio)
+	case report.DistortedRatio > MaxDistortedElementRatio:
+		report.ShouldRebuild = true
+		report.RebuildReason = fmt.Sprintf("high_distortion_ratio_%.3f", report.DistortedRatio)
+	case report.ThicknessViolations > activeCount/10:
+		report.ShouldRebuild = true
+		report.RebuildReason = fmt.Sprintf("too_many_thickness_violations_%d", report.ThicknessViolations)
+	case report.MaxGradient > MaxThicknessGradient*2:
+		report.ShouldRebuild = true
+		report.RebuildReason = fmt.Sprintf("excessive_thickness_gradient_%.3f", report.MaxGradient)
+	case len(s.GrindingHistory) > 0 && len(s.GrindingHistory)%5 == 0 && s.Grid.RebuildCount < len(s.GrindingHistory)/5:
+		report.ShouldRebuild = true
+		report.RebuildReason = "periodic_rebuild_after_grinds"
+	default:
+		report.ShouldRebuild = false
+	}
+
+	s.LastQuality = report
+	return report
+}
+
+func (s *FEMSimulator) checkConnectivity() (int, float64, bool) {
+	if s.Grid == nil {
+		return 0, 0.0, true
+	}
+
+	nx, ny, nz := s.Grid.Nx, s.Grid.Ny, s.Grid.Nz
+	visited := make([][][]bool, nx)
+	for i := 0; i < nx; i++ {
+		visited[i] = make([][]bool, ny)
+		for j := 0; j < ny; j++ {
+			visited[i][j] = make([]bool, nz)
+		}
+	}
+
+	totalActive := 0
+	for i := 0; i < nx; i++ {
+		for j := 0; j < ny; j++ {
+			for k := 0; k < nz; k++ {
+				if s.Grid.Nodes[i][j][k].IsActive {
+					totalActive++
+				}
+			}
+		}
+	}
+
+	if totalActive == 0 {
+		return 0, 0.0, true
+	}
+
+	dirs := [][3]int{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}
+	largestSize := 0
+
+	for si := 0; si < nx; si++ {
+		for sj := 0; sj < ny; sj++ {
+			for sk := 0; sk < nz; sk++ {
+				if !s.Grid.Nodes[si][sj][sk].IsActive || visited[si][sj][sk] {
+					continue
+				}
+				queue := make([][3]int, 0)
+				queue = append(queue, [3]int{si, sj, sk})
+				visited[si][sj][sk] = true
+				size := 0
+
+				for len(queue) > 0 {
+					cur := queue[0]
+					queue = queue[1:]
+					size++
+					i, j, k := cur[0], cur[1], cur[2]
+
+					for _, d := range dirs {
+						ni, nj, nk := i+d[0], j+d[1], k+d[2]
+						if ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz {
+							continue
+						}
+						if visited[ni][nj][nk] || !s.Grid.Nodes[ni][nj][nk].IsActive {
+							continue
+						}
+						visited[ni][nj][nk] = true
+						queue = append(queue, [3]int{ni, nj, nk})
+					}
+				}
+				if size > largestSize {
+					largestSize = size
+				}
+			}
+		}
+	}
+
+	ratio := float64(largestSize) / float64(totalActive)
+	broken := ratio < MinConnectedNodeRatio
+	return largestSize, ratio, broken
+}
+
+func (s *FEMSimulator) repairTopology() int {
+	if s.Grid == nil {
+		return 0
+	}
+	nx, ny, nz := s.Grid.Nx, s.Grid.Ny, s.Grid.Nz
+	visited := make([][][]bool, nx)
+	for i := 0; i < nx; i++ {
+		visited[i] = make([][]bool, ny)
+		for j := 0; j < ny; j++ {
+			visited[i][j] = make([]bool, nz)
+		}
+	}
+
+	dirs := [][3]int{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}
+	bestStart := [3]int{-1, -1, -1}
+	bestSize := 0
+
+	for si := 0; si < nx; si++ {
+		for sj := 0; sj < ny; sj++ {
+			for sk := 0; sk < nz; sk++ {
+				if !s.Grid.Nodes[si][sj][sk].IsActive || visited[si][sj][sk] {
+					continue
+				}
+				queue := make([][3]int, 0)
+				queue = append(queue, [3]int{si, sj, sk})
+				visited[si][sj][sk] = true
+				size := 0
+				for len(queue) > 0 {
+					cur := queue[0]
+					queue = queue[1:]
+					size++
+					i, j, k := cur[0], cur[1], cur[2]
+					for _, d := range dirs {
+						ni, nj, nk := i+d[0], j+d[1], k+d[2]
+						if ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz {
+							continue
+						}
+						if visited[ni][nj][nk] || !s.Grid.Nodes[ni][nj][nk].IsActive {
+							continue
+						}
+						visited[ni][nj][nk] = true
+						queue = append(queue, [3]int{ni, nj, nk})
+					}
+				}
+				if size > bestSize {
+					bestSize = size
+					bestStart = [3]int{si, sj, sk}
+				}
+			}
+		}
+	}
+
+	if bestStart[0] < 0 {
+		return 0
+	}
+
+	visited2 := make([][][]bool, nx)
+	for i := 0; i < nx; i++ {
+		visited2[i] = make([][]bool, ny)
+		for j := 0; j < ny; j++ {
+			visited2[i][j] = make([]bool, nz)
+		}
+	}
+
+	queue := make([][3]int, 0)
+	queue = append(queue, bestStart)
+	visited2[bestStart[0]][bestStart[1]][bestStart[2]] = true
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		i, j, k := cur[0], cur[1], cur[2]
+		for _, d := range dirs {
+			ni, nj, nk := i+d[0], j+d[1], k+d[2]
+			if ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz {
+				continue
+			}
+			if visited2[ni][nj][nk] || !s.Grid.Nodes[ni][nj][nk].IsActive {
+				continue
+			}
+			visited2[ni][nj][nk] = true
+			queue = append(queue, [3]int{ni, nj, nk})
+		}
+	}
+
+	disabled := 0
+	for i := 0; i < nx; i++ {
+		for j := 0; j < ny; j++ {
+			for k := 0; k < nz; k++ {
+				if s.Grid.Nodes[i][j][k].IsActive && !visited2[i][j][k] {
+					s.Grid.Nodes[i][j][k].IsActive = false
+					s.Grid.Nodes[i][j][k].QualityFlag |= TopologyCheckMask
+					disabled++
+				}
+			}
+		}
+	}
+	return disabled
+}
+
+func (s *FEMSimulator) rebuildGridWithStrategy(retryLevel int) error {
+	oldGrid := s.Grid
+	oldGeneration := 0
+	oldRebuildCount := 0
+	if oldGrid != nil {
+		oldGeneration = oldGrid.Generation
+		oldRebuildCount = oldGrid.RebuildCount
+	}
+
+	kernelSize := RebuildSmoothingKernel + retryLevel*2
+	if retryLevel >= 2 {
+		kernelSize = RebuildSmoothingKernel + retryLevel*2 + 2
+	}
+
+	s.GenerateGrid()
+	s.Grid.Generation = oldGeneration + 1
+	s.Grid.RebuildCount = oldRebuildCount + 1
+
+	for _, rec := range s.GrindingHistory {
+		reducedDepth := rec.DepthMm
+		if retryLevel >= 1 {
+			reducedDepth *= (1.0 - 0.1*float64(retryLevel))
+		}
+		s.applyGrindingInternal(rec.Position, reducedDepth)
+	}
+
+	s.applyGridSmoothing(kernelSize)
+	s.repairTopology()
+
+	if retryLevel >= 2 {
+		s.applyGridSmoothing(kernelSize + 2)
+	}
+
+	if oldGrid != nil {
+		s.mapStateFromGrid(oldGrid, s.Grid)
+	}
+
+	quality := s.EvaluateGridQuality()
+	if quality.ShouldRebuild || quality.TopologyBroken {
+		return fmt.Errorf("rebuild_level_%d_failed: %s topology_broken=%v",
+			retryLevel, quality.RebuildReason, quality.TopologyBroken)
+	}
+	return nil
+}
+
+func (s *FEMSimulator) RebuildGrid() error {
+	if len(s.GrindingHistory) == 0 {
+		s.GenerateGrid()
+		return nil
+	}
+
+	var lastErr error
+	for retryLevel := 0; retryLevel < MaxRebuildRetries; retryLevel++ {
+		lastErr = s.rebuildGridWithStrategy(retryLevel)
+		if lastErr == nil {
+			return nil
+		}
+	}
+
+	if s.Grid != nil {
+		s.repairTopology()
+		quality := s.EvaluateGridQuality()
+		if !quality.TopologyBroken {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("rebuild_exhausted_after_%d_retries: last_error=%v", MaxRebuildRetries, lastErr)
+}
+
+func (s *FEMSimulator) applyGridSmoothing(kernelSize int) {
+	if s.Grid == nil {
+		return
+	}
+
+	tempThickness := make([][][]float64, s.Grid.Nx)
+	for i := 0; i < s.Grid.Nx; i++ {
+		tempThickness[i] = make([][]float64, s.Grid.Ny)
+		for j := 0; j < s.Grid.Ny; j++ {
+			tempThickness[i][j] = make([]float64, s.Grid.Nz)
+			for k := 0; k < s.Grid.Nz; k++ {
+				tempThickness[i][j][k] = s.Grid.Nodes[i][j][k].Thickness
+			}
+		}
+	}
+
+	radius := kernelSize / 2
+	for i := 0; i < s.Grid.Nx; i++ {
+		for j := 0; j < s.Grid.Ny; j++ {
+			for k := 0; k < s.Grid.Nz; k++ {
+				node := &s.Grid.Nodes[i][j][k]
+				if !node.IsActive {
+					continue
+				}
+
+				sum := 0.0
+				weight := 0.0
+
+				for di := -radius; di <= radius; di++ {
+					for dj := -radius; dj <= radius; dj++ {
+						for dk := -radius; dk <= radius; dk++ {
+							ni, nj, nk := i+di, j+dj, k+dk
+							if ni < 0 || ni >= s.Grid.Nx || nj < 0 || nj >= s.Grid.Ny || nk < 0 || nk >= s.Grid.Nz {
+								continue
+							}
+							neighbor := s.Grid.Nodes[ni][nj][nk]
+							if !neighbor.IsActive {
+								continue
+							}
+
+							dist := math.Sqrt(float64(di*di + dj*dj + dk*dk))
+							w := math.Exp(-dist * dist / (2.0 * float64(radius) * float64(radius)))
+							sum += tempThickness[ni][nj][nk] * w
+							weight += w
+						}
+					}
+				}
+
+				if weight > 0 {
+					smoothed := sum / weight
+					originalThickness := node.OriginalThickness
+					minAllowed := originalThickness * MinThicknessRatio
+
+					alpha := 0.6
+					node.Thickness = alpha*smoothed + (1-alpha)*tempThickness[i][j][k]
+					if node.Thickness < minAllowed {
+						node.Thickness = minAllowed
+					}
+					if node.Thickness > originalThickness {
+						node.Thickness = originalThickness
+					}
+				}
+			}
+		}
+	}
+}
+
+func (s *FEMSimulator) mapStateFromGrid(src, dst *FEMGrid) {
+	if src == nil || dst == nil {
+		return
+	}
+
+	for i := 0; i < dst.Nx; i++ {
+		for j := 0; j < dst.Ny; j++ {
+			for k := 0; k < dst.Nz; k++ {
+				dstNode := &dst.Nodes[i][j][k]
+				if !dstNode.IsActive {
+					continue
+				}
+
+				nearestDist := math.MaxFloat64
+				var nearestNode *FEMNode
+
+				for si := 0; si < src.Nx; si++ {
+					for sj := 0; sj < src.Ny; sj++ {
+						for sk := 0; sk < src.Nz; sk++ {
+							srcNode := &src.Nodes[si][sj][sk]
+							if !srcNode.IsActive {
+								continue
+							}
+							dist := math.Pow(dstNode.X-srcNode.X, 2) +
+								math.Pow(dstNode.Y-srcNode.Y, 2) +
+								math.Pow(dstNode.Z-srcNode.Z, 2)
+							if dist < nearestDist {
+								nearestDist = dist
+								nearestNode = srcNode
+							}
+						}
+					}
+				}
+
+				if nearestNode != nil {
+					dstNode.Displacement = nearestNode.Displacement
+					dstNode.Velocity = nearestNode.Velocity
+					dstNode.Stress = nearestNode.Stress
+					dstNode.Strain = nearestNode.Strain
+				}
+			}
+		}
+	}
+}
+
+func (s *FEMSimulator) applyGrindingInternal(pos models.GrindingPosition, depthMm float64) {
 	grindRadiusCm := 1.5
 	x0, y0, z0 := pos.X, pos.Y, pos.Z
 
@@ -128,8 +640,9 @@ func (s *FEMSimulator) ApplyGrinding(pos models.GrindingPosition, depthMm float6
 					actualDepth := depthMm * falloff * falloff
 
 					newThickness := node.Thickness - actualDepth
-					if newThickness < node.OriginalThickness*0.4 {
-						newThickness = node.OriginalThickness * 0.4
+					minAllowed := node.OriginalThickness * MinThicknessRatio
+					if newThickness < minAllowed {
+						newThickness = minAllowed
 					}
 
 					node.Thickness = newThickness
@@ -140,9 +653,41 @@ func (s *FEMSimulator) ApplyGrinding(pos models.GrindingPosition, depthMm float6
 	}
 }
 
+func (s *FEMSimulator) ApplyGrinding(pos models.GrindingPosition, depthMm float64) {
+	if s.Grid == nil {
+		s.GenerateGrid()
+	}
+
+	snapshot := s.snapshotGrid()
+	s.applyGrindingInternal(pos, depthMm)
+
+	s.GrindingHistory = append(s.GrindingHistory, GrindingRecord{
+		Position: pos,
+		DepthMm:  depthMm,
+		Time:     time.Now(),
+	})
+
+	quality := s.EvaluateGridQuality()
+	if quality.ShouldRebuild || quality.TopologyBroken {
+		rebuildErr := s.RebuildGrid()
+		if rebuildErr != nil {
+			s.restoreGrid(snapshot)
+			s.GrindingHistory = s.GrindingHistory[:len(s.GrindingHistory)-1]
+		}
+	}
+}
+
 func (s *FEMSimulator) CalculateEigenfrequencies() []float64 {
 	if s.Grid == nil {
 		s.GenerateGrid()
+	}
+
+	quality := s.EvaluateGridQuality()
+	if quality.ShouldRebuild || quality.TopologyBroken {
+		rebuildErr := s.RebuildGrid()
+		if rebuildErr != nil {
+			s.repairTopology()
+		}
 	}
 
 	totalMass := 0.0
@@ -194,14 +739,92 @@ func (s *FEMSimulator) CalculateEigenfrequencies() []float64 {
 }
 
 func (s *FEMSimulator) CalculateFrequencySensitivity(pos models.GrindingPosition) float64 {
+	snapshot := s.snapshotGrid()
 	baseFreqs := s.CalculateEigenfrequencies()
 
 	s.ApplyGrinding(pos, 0.1)
 	newFreqs := s.CalculateEigenfrequencies()
 
+	s.restoreGrid(snapshot)
+
 	sensitivity := (newFreqs[0] - baseFreqs[0]) / 0.1
 
 	return sensitivity
+}
+
+type gridSnapshot struct {
+	thickness       [][][]float64
+	grinded         [][][]bool
+	displacement    [][][][3]float64
+	velocity        [][][][3]float64
+	stress          [][][]float64
+	grindingHistory []GrindingRecord
+	generation      int
+	rebuildCount    int
+}
+
+func (s *FEMSimulator) snapshotGrid() *gridSnapshot {
+	if s.Grid == nil {
+		return nil
+	}
+	g := s.Grid
+	snap := &gridSnapshot{
+		generation:      g.Generation,
+		rebuildCount:    g.RebuildCount,
+		grindingHistory: append([]GrindingRecord(nil), s.GrindingHistory...),
+	}
+	snap.thickness = make([][][]float64, g.Nx)
+	snap.grinded = make([][][]bool, g.Nx)
+	snap.displacement = make([][][][3]float64, g.Nx)
+	snap.velocity = make([][][][3]float64, g.Nx)
+	snap.stress = make([][][]float64, g.Nx)
+
+	for i := 0; i < g.Nx; i++ {
+		snap.thickness[i] = make([][]float64, g.Ny)
+		snap.grinded[i] = make([][]bool, g.Ny)
+		snap.displacement[i] = make([][][3]float64, g.Ny)
+		snap.velocity[i] = make([][][3]float64, g.Ny)
+		snap.stress[i] = make([][]float64, g.Ny)
+		for j := 0; j < g.Ny; j++ {
+			snap.thickness[i][j] = make([]float64, g.Nz)
+			snap.grinded[i][j] = make([]bool, g.Nz)
+			snap.displacement[i][j] = make([][3]float64, g.Nz)
+			snap.velocity[i][j] = make([][3]float64, g.Nz)
+			snap.stress[i][j] = make([]float64, g.Nz)
+			for k := 0; k < g.Nz; k++ {
+				n := g.Nodes[i][j][k]
+				snap.thickness[i][j][k] = n.Thickness
+				snap.grinded[i][j][k] = n.Grinded
+				snap.displacement[i][j][k] = n.Displacement
+				snap.velocity[i][j][k] = n.Velocity
+				snap.stress[i][j][k] = n.Stress
+			}
+		}
+	}
+	return snap
+}
+
+func (s *FEMSimulator) restoreGrid(snap *gridSnapshot) {
+	if snap == nil || s.Grid == nil {
+		return
+	}
+	g := s.Grid
+	g.Generation = snap.generation
+	g.RebuildCount = snap.rebuildCount
+	s.GrindingHistory = snap.grindingHistory
+
+	for i := 0; i < g.Nx; i++ {
+		for j := 0; j < g.Ny; j++ {
+			for k := 0; k < g.Nz; k++ {
+				n := &g.Nodes[i][j][k]
+				n.Thickness = snap.thickness[i][j][k]
+				n.Grinded = snap.grinded[i][j][k]
+				n.Displacement = snap.displacement[i][j][k]
+				n.Velocity = snap.velocity[i][j][k]
+				n.Stress = snap.stress[i][j][k]
+			}
+		}
+	}
 }
 
 func (s *FEMSimulator) GenerateModeShapes(modeOrder int) []models.ModeShapePoint {
@@ -261,6 +884,11 @@ func (s *FEMSimulator) RunSimulation(simType string) *models.SimulationResult {
 	startTime := time.Now()
 
 	s.GenerateGrid()
+
+	for _, rec := range s.GrindingHistory {
+		s.applyGrindingInternal(rec.Position, rec.DepthMm)
+	}
+
 	eigenfreqs := s.CalculateEigenfrequencies()
 
 	modeShapes := make(map[string]interface{})
@@ -273,14 +901,25 @@ func (s *FEMSimulator) RunSimulation(simType string) *models.SimulationResult {
 	stressDist := make(map[string]interface{})
 	stressDist["points"] = stressPoints
 
+	quality := s.EvaluateGridQuality()
+
 	params := map[string]interface{}{
-		"young_modulus":    BronzeYoungModulus,
-		"density":          BronzeDensity,
-		"poisson_ratio":    BronzePoissonRatio,
-		"grid_resolution":  GridResolution,
-		"simulation_type":  simType,
-		"bell_mass_kg":     s.Bell.MassKg,
-		"bell_thickness":   s.Bell.ThicknessMm,
+		"young_modulus":        BronzeYoungModulus,
+		"density":              BronzeDensity,
+		"poisson_ratio":        BronzePoissonRatio,
+		"grid_resolution":      GridResolution,
+		"simulation_type":      simType,
+		"bell_mass_kg":         s.Bell.MassKg,
+		"bell_thickness":       s.Bell.ThicknessMm,
+		"grid_generation":      s.Grid.Generation,
+		"grid_rebuild_count":   s.Grid.RebuildCount,
+		"grinding_history_len": len(s.GrindingHistory),
+		"quality_report": map[string]interface{}{
+			"distorted_ratio":      quality.DistortedRatio,
+			"thickness_violations": quality.ThicknessViolations,
+			"max_gradient":         quality.MaxGradient,
+			"active_nodes":         quality.ActiveNodeCount,
+		},
 	}
 
 	computationMs := time.Since(startTime).Milliseconds()

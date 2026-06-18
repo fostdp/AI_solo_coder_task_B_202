@@ -173,11 +173,6 @@ class App {
         } catch (e) {
             console.error('Failed to load bell data:', e);
         }
-
-        if (this.viewer.showContours) {
-            const mode = parseInt(document.getElementById('modeSelect').value);
-            this.viewer.createContourLines(mode);
-        }
     }
 
     renderBellInfo() {
@@ -291,9 +286,6 @@ class App {
         try {
             const grindingPositions = this.grindingOps.map(op => op.position);
             const result = await API.runSimulation(this.currentBell.id, grindingPositions);
-
-            const mode = parseInt(document.getElementById('modeSelect').value);
-            this.viewer.createContourLines(mode);
 
             alert(`仿真完成！\n计算耗时: ${result.computation_time_ms}ms\n固有频率:\n${result.eigenfrequencies.slice(0, 4).map((f, i) => `  第${i + 1}阶: ${f.toFixed(2)} Hz`).join('\n')}`);
         } catch (e) {
