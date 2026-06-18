@@ -1013,12 +1013,39 @@ class App {
     async playVirtualBell() {
         if (!this.virtualSession) return;
         
+        if (this._audioCache && this._audioCache.sessionId === this.virtualSession.session_id) {
+            this.audioEngine.playVirtualTuning(this._audioCache.data);
+            this._prefetchNextAudio();
+            return;
+        }
+
         try {
             const data = await API.virtualTuningPlay(this.virtualSession.session_id);
+            this._audioCache = {
+                sessionId: this.virtualSession.session_id,
+                data: data,
+                timestamp: Date.now()
+            };
             this.audioEngine.playVirtualTuning(data);
+            this._prefetchNextAudio();
         } catch (e) {
             console.error('Play failed:', e);
         }
+    }
+
+    _prefetchNextAudio() {
+        if (!this.virtualSession) return;
+        
+        clearTimeout(this._prefetchTimer);
+        this._prefetchTimer = setTimeout(async () => {
+            try {
+                const data = await API.virtualTuningPlay(this.virtualSession.session_id);
+                if (this.audioEngine && this.audioEngine.preloadVirtualTuning) {
+                    this.audioEngine.preloadVirtualTuning(data);
+                }
+            } catch (e) {
+            }
+        }, 100);
     }
 
     async resetVirtualTuning() {

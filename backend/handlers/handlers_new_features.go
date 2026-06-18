@@ -179,7 +179,8 @@ func ValidateEmpiricalRule(w http.ResponseWriter, r *http.Request) {
 	}
 	json.Unmarshal(varsJSON, &rule.Variables)
 
-	computed, expected, deviation, valid, confidence := computeRuleValidation(rule, req.Params)
+	computed, expected, deviation, valid, pValue, ciLow, ciHigh, sig, effectSize, stdErr, confidence :=
+		computeRuleValidation(rule, req.Params)
 
 	sampleSize := 100
 	if val, ok := req.Params["sample_size"]; ok {
@@ -189,22 +190,38 @@ func ValidateEmpiricalRule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := models.RuleValidation{
-		RuleID:           rule.ID,
-		ValidationResult: valid,
-		DeviationPercent: deviation,
-		ComputedValue:    computed,
-		ExpectedValue:    expected,
-		SampleSize:       sampleSize,
-		Confidence:       confidence,
+		RuleID:                  rule.ID,
+		ValidationResult:        valid,
+		DeviationPercent:        deviation,
+		ComputedValue:           computed,
+		ExpectedValue:           expected,
+		SampleSize:              sampleSize,
+		Confidence:              confidence,
+		PValue:                  pValue,
+		ConfidenceIntervalLow:   ciLow,
+		ConfidenceIntervalHigh:  ciHigh,
+		StatisticalSignificance: sig,
+		EffectSize:              effectSize,
+		StandardError:           stdErr,
 	}
 
 	respondJSON(w, http.StatusOK, result)
 }
 
-func computeRuleValidation(rule models.EmpiricalRule, params map[string]interface{}) (float64, float64, float64, bool, float64) {
+func computeRuleValidation(rule models.EmpiricalRule, params map[string]interface{}) (
+	float64, float64, float64, bool,
+	float64, float64, float64, bool, float64, float64, float64) {
+
 	expected := 0.0
 	computed := 0.0
-	confidence := 0.8
+	baseConfidence := 0.8
+
+	sampleSize := 100
+	if val, ok := params["sample_size"]; ok {
+		if f, ok := val.(float64); ok {
+			sampleSize = int(f)
+		}
+	}
 
 	if val, ok := params["expected"]; ok {
 		expected, _ = val.(float64)
@@ -248,7 +265,7 @@ func computeRuleValidation(rule models.EmpiricalRule, params map[string]interfac
 	default:
 		computed = 0.0
 		expected = 0.0
-		confidence = 0.5
+		baseConfidence = 0.5
 	}
 
 	deviation := 0.0
@@ -258,7 +275,44 @@ func computeRuleValidation(rule models.EmpiricalRule, params map[string]interfac
 
 	valid := deviation < 10.0
 
-	return computed, expected, deviation, valid, confidence
+	effectSize := 0.0
+	stdErr := 0.0
+	pValue := 1.0
+	ciLow := 0.0
+	ciHigh := 0.0
+	statSig := false
+	confidence := baseConfidence
+
+	if expected > 0 && sampleSize > 1 {
+		effectSize = math.Abs(computed-expected) / expected
+
+		stdErr = expected * 0.05 / math.Sqrt(float64(sampleSize))
+
+		zScore := 0.0
+		if stdErr > 0 {
+			zScore = math.Abs(computed-expected) / stdErr
+		}
+		pValue = 2 * (1.0 - normalCDF(zScore))
+
+		z95 := 1.96
+		marginOfError := z95 * stdErr
+		ciLow = computed - marginOfError
+		ciHigh = computed + marginOfError
+
+		statSig = pValue < 0.05
+
+		sampleFactor := math.Min(1.0, math.Log(float64(sampleSize))/math.Log(1000))
+		deviationPenalty := math.Min(1.0, deviation/20.0)
+		confidence = baseConfidence*0.6 + sampleFactor*0.25 - deviationPenalty*0.2
+		confidence = math.Max(0.1, math.Min(0.99, confidence))
+	}
+
+	return computed, expected, deviation, valid,
+		pValue, ciLow, ciHigh, statSig, effectSize, stdErr, confidence
+}
+
+func normalCDF(x float64) float64 {
+	return 0.5 * (1.0 + math.Erf(x/math.Sqrt2))
 }
 
 func GetComparisonArticles(w http.ResponseWriter, r *http.Request) {

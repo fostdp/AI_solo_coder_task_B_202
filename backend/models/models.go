@@ -142,6 +142,10 @@ type ProcessComparisonResult struct {
 	RequiredTimeMin int     `json:"required_time_min"`
 	CostScore       float64 `json:"cost_score"`
 	OverallScore    float64 `json:"overall_score"`
+	MeasurementSource  string  `json:"measurement_source"`
+	MeasurementMethod  string  `json:"measurement_method"`
+	MeasurementUncertainty float64 `json:"measurement_uncertainty_cents"`
+	Calibrated           bool    `json:"calibrated"`
 }
 
 type EmpiricalRule struct {
@@ -163,6 +167,12 @@ type RuleValidation struct {
 	ExpectedValue    float64 `json:"expected_value"`
 	SampleSize       int     `json:"sample_size"`
 	Confidence       float64 `json:"confidence"`
+	PValue           float64 `json:"p_value"`
+	ConfidenceIntervalLow  float64 `json:"confidence_interval_low"`
+	ConfidenceIntervalHigh float64 `json:"confidence_interval_high"`
+	StatisticalSignificance bool   `json:"statistical_significance"`
+	EffectSize       float64 `json:"effect_size"`
+	StandardError    float64 `json:"standard_error"`
 }
 
 type ComparisonArticle struct {

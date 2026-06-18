@@ -1,10 +1,17 @@
 class BellAudioEngine {
+    static STANDARD_PITCH_A4 = 440.0;
+    static MIDI_A4 = 69;
+    static CENTS_PER_OCTAVE = 1200;
+    static SEMITONES_PER_OCTAVE = 12;
+
     constructor() {
         this.audioContext = null;
         this.masterGain = null;
         this.isInitialized = false;
         this.currentOscillators = [];
         this.reverb = null;
+        this._preloadedBuffers = new Map();
+        this._isPreloading = false;
     }
 
     init() {
@@ -145,12 +152,119 @@ class BellAudioEngine {
 
     playVirtualTuning(sessionData) {
         if (!sessionData || !sessionData.freqs) return;
+
+        const cacheKey = sessionData.freqs.join(',');
+        if (this._preloadedBuffers.has(cacheKey)) {
+            const cached = this._preloadedBuffers.get(cacheKey);
+            this._playFromCache(cached);
+            return;
+        }
+
         this.playBellSound(
             sessionData.freqs,
             sessionData.amplitudes,
             sessionData.decay_rates,
             10
         );
+    }
+
+    preloadVirtualTuning(sessionData) {
+        if (!this.isInitialized) this.init();
+        if (!sessionData || !sessionData.freqs) return;
+        if (this._isPreloading) return;
+
+        const cacheKey = sessionData.freqs.join(',');
+        if (this._preloadedBuffers.has(cacheKey)) return;
+
+        this._isPreloading = true;
+        try {
+            const freqs = sessionData.freqs;
+            const amplitudes = sessionData.amplitudes;
+            const decayRates = sessionData.decay_rates;
+            const duration = 10;
+            const ctx = this.audioContext;
+
+            const nodes = [];
+            freqs.forEach((freq, i) => {
+                if (freq <= 0) return;
+
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                const filter = ctx.createBiquadFilter();
+
+                osc.type = i === 0 ? 'sine' : 'triangle';
+                osc.frequency.value = freq;
+
+                filter.type = 'lowpass';
+                filter.frequency.value = Math.min(freq * 4, 10000);
+                filter.Q.value = 1;
+
+                const amp = amplitudes ? amplitudes[i] : Math.exp(-i * 0.4);
+                const decay = decayRates ? decayRates[i] : (2 + i * 0.8);
+
+                gain.gain.setValueAtTime(0, ctx.currentTime);
+                gain.gain.linearRampToValueAtTime(amp * 0.5, ctx.currentTime + 0.01);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration * (decay / 5));
+
+                if (i >= 2) {
+                    const detune = (Math.random() - 0.5) * 20;
+                    osc.detune.value = detune;
+                }
+
+                osc.connect(filter);
+                filter.connect(gain);
+                gain.connect(this.masterGain);
+
+                nodes.push({ osc, gain, filter, started: false });
+            });
+
+            const strike = ctx.createOscillator();
+            const strikeGain = ctx.createGain();
+            strike.type = 'square';
+            strike.frequency.value = freqs[0] * 3;
+            strikeGain.gain.setValueAtTime(0.1, ctx.currentTime);
+            strikeGain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+            strike.connect(strikeGain);
+            strikeGain.connect(this.masterGain);
+
+            nodes.push({ osc: strike, gain: strikeGain, isStrike: true, started: false });
+
+            this._preloadedBuffers.set(cacheKey, { nodes, createdAt: Date.now() });
+
+            setTimeout(() => {
+                if (this._preloadedBuffers.has(cacheKey)) {
+                    this._preloadedBuffers.delete(cacheKey);
+                }
+            }, 5000);
+        } finally {
+            this._isPreloading = false;
+        }
+    }
+
+    _playFromCache(cached) {
+        const now = this.audioContext.currentTime;
+        this.stopCurrentSound();
+
+        cached.nodes.forEach(({ osc, gain }) => {
+            osc.start(now);
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(gain.gain.value, now + 0.005);
+            this.currentOscillators.push({ osc, gain });
+        });
+    }
+
+    playBellToneFast(frequency, duration = 3) {
+        if (!this.isInitialized) this.init();
+        this.resume();
+
+        const cacheKey = `tone_${frequency}_${duration}`;
+
+        if (this._preloadedBuffers.has(cacheKey)) {
+            this._playFromCache(this._preloadedBuffers.get(cacheKey));
+            return;
+        }
+
+        this.playBellTone(frequency, duration);
     }
 
     stopCurrentSound() {
@@ -177,16 +291,20 @@ class BellAudioEngine {
     getFrequencyName(frequency) {
         const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
         if (frequency <= 0) return '—';
-        const noteNum = 12 * (Math.log2(frequency / 440)) + 69;
-        const octave = Math.floor(noteNum / 12) - 1;
-        const noteIndex = Math.round(noteNum) % 12;
-        const cents = 1200 * (Math.log2(frequency / 440) - (noteNum - 69) / 12);
+        const noteNum = BellAudioEngine.SEMITONES_PER_OCTAVE * 
+            (Math.log2(frequency / BellAudioEngine.STANDARD_PITCH_A4)) + 
+            BellAudioEngine.MIDI_A4;
+        const octave = Math.floor(noteNum / BellAudioEngine.SEMITONES_PER_OCTAVE) - 1;
+        const noteIndex = Math.round(noteNum) % BellAudioEngine.SEMITONES_PER_OCTAVE;
+        const cents = BellAudioEngine.CENTS_PER_OCTAVE * 
+            (Math.log2(frequency / BellAudioEngine.STANDARD_PITCH_A4) - 
+            (noteNum - BellAudioEngine.MIDI_A4) / BellAudioEngine.SEMITONES_PER_OCTAVE);
         const centsStr = cents > 0 ? `+${cents.toFixed(0)}` : cents.toFixed(0);
         return `${notes[noteIndex]}${octave} (${centsStr}¢)`;
     }
 
     centsToDelta(cents) {
-        return Math.pow(2, cents / 1200);
+        return Math.pow(2, cents / BellAudioEngine.CENTS_PER_OCTAVE);
     }
 }
 
