@@ -1,0 +1,281 @@
+version: "3.9"
+
+x-common-env: &common-env
+  TZ: Asia/Shanghai
+  LOG_LEVEL: info
+
+services:
+  # ============================================================
+  # 1. TimescaleDB  (PostgreSQL + Timescale hypertable/retention/CAGG)
+  # ============================================================
+  timescale:
+    image: timescale/timescaledb:2.14.2-pg16
+    container_name: bianzhong-timescaledb
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      POSTGRES_DB: bianzhong
+      POSTGRES_USER: bianzhong
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-bianzhong_secure_pw_2024!}
+      TIMESCALEDB_TELEMETRY: "off"
+      PGDATA: /var/lib/postgresql/data/timescaledb
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./sql/timescale_policies.sql:/docker-entrypoint-initdb.d/02-policies.sql:ro
+    command: >
+      -c shared_preload_libraries=timescaledb
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c work_mem=4MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bianzhong -d bianzhong"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - bianzhong-net
+
+  # ============================================================
+  # 2. MQTT Broker (Eclipse Mosquitto)
+  # ============================================================
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0.18
+    container_name: bianzhong-mqtt
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+      - "${MQTT_WS_PORT:-9001}:9001"
+    volumes:
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+      - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    command: ["/usr/sbin/mosquitto", "-c", "/mosquitto/config/mosquitto.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 mosquitto_sub -t '$$SYS/#' -C 1 -i healthcheck || exit 0"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - bianzhong-net
+
+  # ============================================================
+  # 3. Bianzhong Acoustic Backend (Go service)
+  # ============================================================
+  bianzhong-server:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bianzhong-server
+    restart: unless-stopped
+    depends_on:
+      timescale:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      PORT: "8080"
+      CONFIG_DIR: "/app/config"
+      FRONTEND_DIR: "/app/frontend"
+      DB_HOST: timescale
+      DB_PORT: "5432"
+      DB_USER: bianzhong
+      DB_PASSWORD: ${DB_PASSWORD:-bianzhong_secure_pw_2024!}
+      DB_NAME: bianzhong
+      DB_SSLMODE: disable
+      DB_MAX_OPEN_CONNS: "30"
+      MQTT_BROKER: mqtt-broker:1883
+      MQTT_CLIENT_ID: bianzhong-backend
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+      MQTT_QOS: "1"
+      HTTP_READ_TIMEOUT: "30s"
+      HTTP_WRITE_TIMEOUT: "30s"
+      HTTP_IDLE_TIMEOUT: "120s"
+      GRACEFUL_SHUTDOWN_TIMEOUT: "30s"
+      PPROF_ADDR: ":6060"
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+      - "${PPROF_PORT:-6060}:6060"
+    volumes:
+      - ./backend/config:/app/config:ro
+      - ./frontend:/app/frontend:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - bianzhong-net
+
+  # ============================================================
+  # 4. Prometheus Metrics Collector
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:v2.49.1
+    container_name: bianzhong-prometheus
+    restart: unless-stopped
+    depends_on:
+      - bianzhong-server
+    environment:
+      <<: *common-env
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=90d'
+      - '--storage.tsdb.retention.size=10GB'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--web.listen-address=:9090'
+    ports:
+      - "${PROM_PORT:-9090}:9090"
+    volumes:
+      - prometheus-data:/prometheus
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/ready | grep -q 'Prometheus is Ready' || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks:
+      - bianzhong-net
+
+  # ============================================================
+  # 5. Grafana Dashboard
+  # ============================================================
+  grafana:
+    image: grafana/grafana:10.2.3
+    container_name: bianzhong-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - timescale
+    environment:
+      <<: *common-env
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: "grafana-clock-panel,grafana-simple-json-datasource"
+      GF_SERVER_ROOT_URL: "http://localhost:${GRAFANA_PORT:-3000}"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/:/etc/grafana/provisioning/:ro
+      - ./monitoring/grafana/dashboards/:/var/lib/grafana/dashboards/:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q '\"database\":\\s*\"ok\"' || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    networks:
+      - bianzhong-net
+
+  # ============================================================
+  # 6. Bell Tuning Simulator (Python)
+  # ============================================================
+  bell-simulator:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile
+    container_name: bianzhong-simulator
+    restart: "no"
+    depends_on:
+      bianzhong-server:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      API_BASE_URL: "http://bianzhong-server:8080"
+      MQTT_BROKER: "mqtt-broker:1883"
+      BELL_ID: ${SIM_BELL_ID:-bell-sim-01}
+      BELL_NAME: ${SIM_BELL_NAME:-仿真编钟-Sim01}
+      BELL_DIAMETER_CM: "${SIM_DIAMETER:-40.0}"
+      BELL_HEIGHT_CM: "${SIM_HEIGHT:-80.0}"
+      BELL_THICKNESS_MM: "${SIM_THICKNESS:-15.0}"
+      TARGET_NOTE: "${SIM_TARGET_NOTE:-E4}"
+      TARGET_FREQ_HZ: "${SIM_TARGET_FREQ:-}"
+      TARGET_TOLERANCE_CENTS: "${SIM_TOLERANCE:-10}"
+      INITIAL_OFFSET_CENTS: "${SIM_INITIAL_OFFSET:-45}"
+      MEASUREMENT_INTERVAL_S: "${SIM_MEASURE_INTERVAL:-5}"
+      MEASUREMENT_NOISE_CENTS: "${SIM_NOISE:-2}"
+      GRIND_ENABLED: "${SIM_GRIND_ENABLED:-1}"
+      GRIND_INTERVAL_MEASUREMENTS: "${SIM_GRIND_INTERVAL:-3}"
+      GRIND_POSITIONS: "${SIM_GRIND_POSITIONS:-0,45,90,135,180,225,270,315}"
+      GRIND_HEIGHTS: "${SIM_GRIND_HEIGHTS:-0.3,0.5,0.7}"
+      GRIND_DEPTH_MM: "${SIM_GRIND_DEPTH:-0.12}"
+      AUTO_TUNE: "${SIM_AUTO_TUNE:-1}"
+      SESSION_SECONDS: "${SIM_SESSION_SECONDS:-0}"
+      VERBOSE: "${SIM_VERBOSE:-0}"
+    networks:
+      - bianzhong-net
+    profiles:
+      - simulator
+
+  # ============================================================
+  # 7. (Optional) nginx frontend proxy with gzip/brotli + cache
+  # ============================================================
+  nginx-proxy:
+    image: nginx:1.25-alpine
+    container_name: bianzhong-nginx
+    restart: unless-stopped
+    depends_on:
+      - bianzhong-server
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html/frontend:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/api/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - bianzhong-net
+    profiles:
+      - nginx
+
+# ============================================================
+# Networks
+# ============================================================
+networks:
+  bianzhong-net:
+    driver: bridge
+    name: bianzhong-net
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+
+# ============================================================
+# Named Volumes
+# ============================================================
+volumes:
+  timescale-data:
+    name: bianzhong-timescale-data
+  mosquitto-data:
+    name: bianzhong-mqtt-data
+  mosquitto-log:
+    name: bianzhong-mqtt-log
+  prometheus-data:
+    name: bianzhong-prometheus-data
+  grafana-data:
+    name: bianzhong-grafana-data
