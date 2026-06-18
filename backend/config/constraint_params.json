@@ -1,0 +1,37 @@
+{
+  "optimization": {
+    "algorithm": "augmented_lagrangian",
+    "default_rho": 100.0,
+    "rho_increase_factor": 10.0,
+    "max_rho": 100000000.0,
+    "lambda_tolerance": 0.0001,
+    "constraint_tolerance": 0.0001,
+    "max_outer_iterations": 15,
+    "max_inner_iterations": 20,
+    "learning_rate": 0.05,
+    "convergence_factor": 1e-6
+  },
+  "line_search": {
+    "alpha": 0.5,
+    "beta": 0.5,
+    "max_backtrack_steps": 20
+  },
+  "boundaries": {
+    "min_depth_per_position_mm": 0.005,
+    "max_depth_per_position_mm": 0.8,
+    "max_variables": 5,
+    "min_sensitivity_score": 0.01
+  },
+  "oscillation_control": {
+    "boundary_damping_zone_ratio": 0.05,
+    "boundary_damping_factor": 0.2,
+    "oscillation_lookback": 3,
+    "oscillation_threshold_ratio": 0.6
+  },
+  "candidate_positions": {
+    "angular_segments": 8,
+    "height_levels": 4,
+    "radius_factor_inner": 0.7,
+    "radius_factor_outer": 0.85
+  }
+}

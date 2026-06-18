@@ -1,0 +1,26 @@
+{
+  "materials": {
+    "bronze": {
+      "young_modulus_pa": 110000000000,
+      "density_kg_m3": 8800.0,
+      "poisson_ratio": 0.34,
+      "speed_of_sound_m_s": 3500.0
+    }
+  },
+  "grid": {
+    "resolution": 20,
+    "min_thickness_ratio": 0.4,
+    "max_thickness_gradient": 0.3,
+    "max_distorted_element_ratio": 0.08,
+    "rebuild_smoothing_kernel": 3,
+    "max_rebuild_retries": 3,
+    "min_connected_node_ratio": 0.6
+  },
+  "grinding": {
+    "grind_radius_cm": 1.5,
+    "sensitivity_perturbation_mm": 0.1
+  },
+  "harmonic_ratios": [1.0, 2.0, 3.0, 4.16, 5.42, 6.78, 8.15, 9.63],
+  "frequency_calibration_factor": 0.85,
+  "thickness_exponent": 0.75
+}
